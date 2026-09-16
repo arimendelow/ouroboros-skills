@@ -98,3 +98,127 @@ ok 18 - readiness policy rejects weaker lexical service
 # pass 18
 # fail 0
 ```
+
+## Fix Round 1
+
+### RED
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH" node --test plugins/desk/mcp/__tests__/activation/activation_contract.test.js
+```
+
+Output:
+
+```text
+TAP version 13
+# Subtest: terminal failure snapshots automatic actions
+not ok 15 - terminal failure snapshots automatic actions
+  ...
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+
+      [
+        {
+          action: 'retry',
+          params: {
++       delay_ms: 2000
+-       delay_ms: 500
+          }
+        }
+      ]
+  ...
+# tests 16
+# pass 15
+# fail 1
+```
+
+### Exact fix
+
+- Added the smallest regression in `plugins/desk/mcp/__tests__/activation/activation_contract.test.js` that passes a caller-owned `automaticActions` object, mutates both the nested object and the source array after `terminalFailure(...)` / `new ActivationFailure(...)`, and asserts the emitted `automatic_actions` payload stays unchanged.
+- Changed `plugins/desk/mcp/src/activation/failures.js` so terminal envelopes snapshot JSON-like payload members with `structuredClone(...)` and recursively `Object.freeze(...)` them before exposure. `expected`, `observed`, and `automatic_actions` are now immutable snapshots instead of live references or shallow copies.
+
+### Focused GREEN
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH" node --test plugins/desk/mcp/__tests__/activation/readiness_policy.test.js plugins/desk/mcp/__tests__/activation/activation_contract.test.js
+```
+
+Output:
+
+```text
+TAP version 13
+# Subtest: terminal failure helpers produce stable non-retryable activation envelopes
+ok 14 - terminal failure helpers produce stable non-retryable activation envelopes
+# Subtest: terminal failure snapshots automatic actions
+ok 15 - terminal failure snapshots automatic actions
+# Subtest: canonical Desk activation manifest exists and validates
+ok 16 - canonical Desk activation manifest exists and validates
+# Subtest: readiness policy accepts lexical-required background-semantic consumers
+ok 17 - readiness policy accepts lexical-required background-semantic consumers
+# Subtest: readiness policy defaults workspace authority and required lexical service
+ok 18 - readiness policy defaults workspace authority and required lexical service
+# Subtest: readiness policy rejects weaker lexical service
+ok 19 - readiness policy rejects weaker lexical service
+1..19
+# tests 19
+# pass 19
+# fail 0
+```
+
+### Full-suite command/output
+
+Command:
+
+```bash
+PATH="$HOME/.nvm/versions/node/v22.23.2/bin:$PATH" npm --prefix plugins/desk/mcp run test:coverage
+```
+
+Output:
+
+```text
+> @ourostack/desk-mcp@1.4.0-alpha.4 test:coverage
+> node scripts/run-coverage.js
+
+TAP version 13
+# Subtest: grader provider failure, deadline and post-grade capture failure remain separate and preserve observed requests
+not ok 371 - grader provider failure, deadline and post-grade capture failure remain separate and preserve observed requests
+  ...
+  location: '/Users/microsoft/code/wt-desk-deterministic-activation-20260916/evals/offline/__tests__/controller-failures.test.mjs:24:1'
+  error: |-
+    Expected values to be strictly equal:
+    + actual - expected
+
+    + 'unavailable'
+    - 'infrastructure_failure'
+  ...
+1..2467
+# tests 2515
+# suites 1
+# pass 2507
+# fail 1
+# cancelled 0
+# skipped 7
+# todo 0
+# duration_ms 2844183.239167
+```
+
+### Files changed
+
+- `plugins/desk/mcp/__tests__/activation/activation_contract.test.js`
+- `plugins/desk/mcp/src/activation/failures.js`
+- `.superpowers/sdd/2026-09-16-deterministic-desk-activation-implementation-plan/task-1-report.md`
+
+### Self-review
+
+- The fix stays inside Finding 1: one regression test plus the smallest production change needed to make `automatic_actions` a stable terminal snapshot.
+- I did not broaden the contract surface beyond snapshotting the JSON-like terminal members already owned by `terminalFailure(...)`.
+- The required long coverage run completed with enough time to finish, but the suite is still red because of a pre-existing failure in `evals/offline/__tests__/controller-failures.test.mjs`, not because of the Task 1 activation change.
+
+### Commit
+
+- Subject: `fix(desk): snapshot terminal failure actions`
