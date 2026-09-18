@@ -23,12 +23,12 @@ Commands run:
 - `npm --prefix plugins/desk/mcp run artifact:snapshot:verify -- --snapshot-id repo-public-bootstrap-2026-06-15`
 - `node scripts/test-desk-generated-artifacts.cjs`
 
-Current alpha.4 candidate freshness anchors (not historical run identities):
+Current alpha.5 candidate freshness anchors (not historical run identities):
 
-- current_artifact_source_scope_hash: sha256:21f0ffc8675ea9ecd1e0e44b95f655e404b95654ad873ad86bfa2b7d68745584
+- current_artifact_source_scope_hash: sha256:570365742ccc1cbfc9b843c6d9a39bff82ac1834d56cd70dd64bfd18bca2e2a1
 - current_document_tree_hash: sha256:b8268841c4877dfe293de7c463eadf38339c741daa6416ffd5b1ec652087fba8
 
-The local `desk-mcp@1.4.0-alpha.4` candidate was re-anchored the same way: the approved public snapshot and pack were restored into a scratch desk outside this repository, then rebuilt through the maintained vector-pack and snapshot builders with `--from-local-db`. No indexing or embedding call was made — the restore reported zero documents indexed, zero rows imported and two duplicate rows skipped. The vector-pack payload stays byte-identical; the snapshot payload differs only as a fresh SQLite serialization of the same restored rows. Current manifest source hashes, provenance commit and timestamps changed. The published sections below retain the historical hashes and source provenance, not a claim that the alpha.4 composition was published or passed native admission.
+The local `desk-mcp@1.4.0-alpha.5` candidate was re-anchored the same way: the approved public snapshot and pack were restored into a disposable scratch desk outside this repository, then rebuilt through the maintained vector-pack and snapshot builders with `--from-local-db` and provenance commit `28b0f276b13ffcf0d67fd713098e4f0cc37107ec`. No indexing or embedding call was made. The vector-pack payload and checksum stayed byte-identical, and the snapshot rebuild stayed within the same restored-rows boundary: this run reserialized the same restored SQLite state and reproduced the same snapshot bytes and checksum. Current manifest source hashes, provenance commit and timestamps changed. Runtime-pack publication remained a separate accepted commit. The published sections below retain the historical hashes and source provenance, not a claim that the alpha.5 composition was published or passed native admission.
 
 Published vector pack:
 
