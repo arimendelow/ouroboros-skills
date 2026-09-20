@@ -23,12 +23,12 @@ Commands run:
 - `npm --prefix plugins/desk/mcp run artifact:snapshot:verify -- --snapshot-id repo-public-bootstrap-2026-06-15`
 - `node scripts/test-desk-generated-artifacts.cjs`
 
-Current alpha.6 candidate freshness anchors (not historical run identities):
+Current alpha.5 candidate freshness anchors (not historical run identities):
 
-- current_artifact_source_scope_hash: sha256:596246919fc5088c5eface01881ba52ff6baecafed2154c65ee2c691671a44c4
+- current_artifact_source_scope_hash: sha256:570365742ccc1cbfc9b843c6d9a39bff82ac1834d56cd70dd64bfd18bca2e2a1
 - current_document_tree_hash: sha256:b8268841c4877dfe293de7c463eadf38339c741daa6416ffd5b1ec652087fba8
 
-The local `desk-mcp@1.4.0-alpha.6` candidate restores the approved public snapshot into a disposable scratch desk and rebuilds through the maintained vector-pack and snapshot builders with `--from-local-db`, anchored to [the alpha.6 source-surface commit](https://github.com/ourostack/ouroboros-skills/commit/b226788a0f53a4194d998bf4ff98fa76464081b0). That commit is local and unpublished at assembly time. No indexing or embedding call is made. The [vector manifest](../../../plugins/desk/artifacts/vector-packs/nomic-embed-text-v1_5-desk-md-h2-paragraph-v1-unicode-whitespace-v1-768/repo-public-bootstrap-2026-06-15.manifest.json) retains the same two vectors and one document; vector payload and checksum are byte-identical. The [snapshot manifest](../../../plugins/desk/artifacts/snapshots/nomic-embed-text-v1_5-desk-md-h2-paragraph-v1-unicode-whitespace-v1-768/repo-public-bootstrap-2026-06-15.manifest.json) records the rebuilt snapshot checksum `sha256:ae5c8cd55f21aeea86aa4c85ebc37d6bbea52b510e2e83c8078d2f1c7fb23862`: opening the restored DB through the current maintained schema adds the durability/lexical tables, so snapshot bytes and checksum change without changing the represented document or vector rows. Current source hashes, provenance and timestamps are refreshed. The published sections below retain their historical identities, not a claim that alpha.6 was published or passed native admission.
+The local `desk-mcp@1.4.0-alpha.5` candidate was re-anchored the same way: the approved public snapshot and pack were restored into a disposable scratch desk outside this repository, then rebuilt through the maintained vector-pack and snapshot builders with `--from-local-db` and provenance commit `28b0f276b13ffcf0d67fd713098e4f0cc37107ec`. No indexing or embedding call was made. The vector-pack payload and checksum stayed byte-identical, and the snapshot rebuild stayed within the same restored-rows boundary: this run reserialized the same restored SQLite state and reproduced the same snapshot bytes and checksum. Current manifest source hashes, provenance commit and timestamps changed. Runtime-pack publication remained a separate accepted commit. The published sections below retain the historical hashes and source provenance, not a claim that the alpha.5 composition was published or passed native admission.
 
 Published vector pack:
 
