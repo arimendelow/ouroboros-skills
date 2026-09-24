@@ -740,6 +740,52 @@ test('a missing context with an active lease cannot launch a replacement', async
   );
 });
 
+test('absent-context recovery sees a lease renewed during discovery', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const previousIdentity = processIdentity(declaration, 1228);
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: {
+      requested: {
+        contextId: declaration.id,
+        endpoint: 'http://127.0.0.1:49228',
+        processIdentity: previousIdentity,
+      },
+    },
+    leases: {
+      renewing: {
+        id: 'renewing',
+        contextId: declaration.id,
+        owner: 'agent-renewing',
+        processIdentity: previousIdentity,
+        targetIds: ['renewing-target'],
+        heartbeatAt: new Date(0).toISOString(),
+        expiresAt: new Date(0).toISOString(),
+      },
+    },
+  });
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        if (operation !== 'discover') throw new Error(`unexpected operation ${operation}`);
+        const current = await readRegistry(directory);
+        current.leases.renewing.heartbeatAt = new Date().toISOString();
+        current.leases.renewing.expiresAt = new Date(Date.now() + 60_000).toISOString();
+        await writeRegistry(directory, current);
+        return { found: false };
+      },
+    }),
+    (error) =>
+      error.code === 'CONTEXT_RECOVERY_CONFLICT' &&
+      error.details.leases[0].leaseId === 'renewing',
+  );
+});
+
 test('retries destructive recovery on a provider-reported endpoint collision', async () => {
   const directory = await stateDir();
   const declaration = recoverableConfig.contexts[0];

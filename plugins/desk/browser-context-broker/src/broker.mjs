@@ -380,8 +380,9 @@ async function acquireContextLocked({
   }
 
   const replacementObservation = observation ?? registryObservation;
+  const currentRegistry = await readRegistry(stateDir);
   const blockingLeases = summarizeContextLeases(
-    registry,
+    currentRegistry,
     declaration.id,
     replacementObservation?.processIdentity,
   );
