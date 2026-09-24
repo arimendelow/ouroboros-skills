@@ -264,11 +264,23 @@ async function acquireContextLocked({
         return publicResult(declaration, restored, 'reconnected');
       }
       const recoveryReason = nonDestructive?.reason;
+      if (
+        nonDestructive?.recovered !== false ||
+        typeof recoveryReason !== 'string' ||
+        recoveryReason.length === 0
+      ) {
+        throw new BrokerError(
+          'CONTEXT_RECOVERY_FAILED',
+          'Provider returned an invalid non-destructive recovery result',
+          { contextId: declaration.id },
+        );
+      }
       if (recoveryReason && !RECOVERABLE_REASONS.has(recoveryReason)) {
         const recoveryFailure = { reason: recoveryReason };
         failClosedAttestation(declaration, recoveryFailure);
+        const recognizedUnsafeReason = recoveryReason === 'ENDPOINT_PROCESS_MISMATCH';
         throw new BrokerError(
-          'LAUNCH_ATTESTATION_FAILED',
+          recognizedUnsafeReason ? 'LAUNCH_ATTESTATION_FAILED' : 'CONTEXT_RECOVERY_FAILED',
           'Non-destructive recovery produced an unsafe attestation state',
           { contextId: declaration.id, reason: recoveryReason },
         );

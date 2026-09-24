@@ -917,6 +917,7 @@ for (const reason of [
           if (operation === 'attest') {
             return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
           }
+
           if (operation === 'recover' && payload.mode === 'non-destructive') {
             return { recovered: false, mode: 'non-destructive', reason };
           }
@@ -928,6 +929,43 @@ for (const reason of [
           ? 'LAUNCH_ATTESTATION_FAILED'
           : reason
       ),
+    );
+    assert.deepEqual(operations, ['discover', 'attest', 'recover']);
+  });
+}
+
+for (const response of [
+  {},
+  { recovered: false },
+  { recovered: true },
+  { recovered: false, reason: 'UNKNOWN_RECOVERY_STATE' },
+]) {
+  test(`malformed non-destructive response cannot authorize restart: ${JSON.stringify(response)}`, async () => {
+    const directory = await stateDir();
+    const declaration = recoverableConfig.contexts[0];
+    const observation = {
+      contextId: declaration.id,
+      endpoint: 'http://127.0.0.1:49440',
+      processIdentity: processIdentity(declaration, 1441),
+    };
+    const operations = [];
+
+    await assert.rejects(
+      acquireContext({
+        config: recoverableConfig,
+        request: { surface: 'work', identity: 'requested@example.test' },
+        stateDir: directory,
+        providerInvoker: async (operation) => {
+          operations.push(operation);
+          if (operation === 'discover') return { found: true, observation };
+          if (operation === 'attest') {
+            return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+          }
+          if (operation === 'recover') return response;
+          throw new Error(`unexpected operation ${operation}`);
+        },
+      }),
+      (error) => error.code === 'CONTEXT_RECOVERY_FAILED',
     );
     assert.deepEqual(operations, ['discover', 'attest', 'recover']);
   });
