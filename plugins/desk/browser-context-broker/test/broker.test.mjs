@@ -513,6 +513,7 @@ test('returns active lease owners instead of restarting an unhealthy shared cont
         heartbeatAt: error.details.leases[0].heartbeatAt,
         expiresAt: error.details.leases[0].expiresAt,
         targetCount: 1,
+        releasing: false,
         processGenerationMatch: true,
       }]);
       return true;
@@ -565,7 +566,7 @@ test('an active lease from a different process generation still blocks destructi
   );
 });
 
-test('expired and releasing leases do not block destructive recovery', async () => {
+test('expired leases do not block destructive recovery', async () => {
   const directory = await stateDir();
   const declaration = recoverableConfig.contexts[0];
   const oldObservation = {
@@ -590,16 +591,6 @@ test('expired and releasing leases do not block destructive recovery', async () 
         targetIds: [],
         heartbeatAt: new Date(0).toISOString(),
         expiresAt: new Date(0).toISOString(),
-      },
-      releasing: {
-        id: 'releasing',
-        contextId: declaration.id,
-        owner: 'agent-releasing',
-        processIdentity: oldObservation.processIdentity,
-        targetIds: [],
-        heartbeatAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        releasing: true,
       },
     },
   });
@@ -626,6 +617,52 @@ test('expired and releasing leases do not block destructive recovery', async () 
   });
 
   assert.equal(result.recovery, 'restarted');
+});
+
+test('a releasing lease blocks destructive recovery until release completes', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49225',
+    processIdentity: processIdentity(declaration, 1225),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: observation },
+    leases: {
+      releasing: {
+        id: 'releasing',
+        contextId: declaration.id,
+        owner: 'agent-releasing',
+        processIdentity: observation.processIdentity,
+        targetIds: ['target-being-closed'],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        releasing: true,
+      },
+    },
+  });
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') {
+          return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
+        }
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) =>
+      error.code === 'CONTEXT_RECOVERY_CONFLICT' &&
+      error.details.leases[0].leaseId === 'releasing' &&
+      error.details.leases[0].releasing === true,
+  );
 });
 
 test('retries destructive recovery on a provider-reported endpoint collision', async () => {
