@@ -988,3 +988,39 @@ for (const response of [
     assert.deepEqual(operations, ['discover', 'attest', 'recover']);
   });
 }
+
+test('successful non-destructive recovery with unhealthy observation never restarts', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49450',
+    processIdentity: processIdentity(declaration, 1451),
+  };
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation, payload) => {
+        operations.push(`${operation}:${payload?.mode ?? 'default'}`);
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') {
+          return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+        }
+        if (operation === 'recover' && payload.mode === 'non-destructive') {
+          return {
+            recovered: true,
+            mode: 'non-destructive',
+            observation: {},
+          };
+        }
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'CONTEXT_RECOVERY_FAILED',
+  );
+  assert.equal(operations.some((operation) => operation === 'recover:restart'), false);
+});

@@ -272,6 +272,34 @@ test('proxy closes when its lease heartbeat reports expiration', async (t) => {
   await assert.rejects(fetch(`${proxy.endpoint}/json/version`));
 })
 
+test('proxy closes when its lease starts releasing', async (t) => {
+  const fake = await startFakeCdpServer();
+  t.after(() => fake.close());
+  const directory = await stateDir();
+  const lease = await createLease({
+    stateDir: directory,
+    context: declaration,
+    owner: 'agent-releasing',
+    rawEndpoint: fake.endpoint,
+    processIdentity,
+  });
+  const proxy = await startLeaseProxy({
+    stateDir: directory,
+    leaseId: lease.id,
+    declaration,
+    providerInvoker: attestingProvider,
+    heartbeatLeaseFn: async () => {
+      const error = new Error('releasing');
+      error.code = 'LEASE_RELEASING';
+      throw error;
+    },
+    heartbeatIntervalMs: 5,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await assert.rejects(fetch(`${proxy.endpoint}/json/version`));
+})
+
 test('proxy startup rejects a lease that already expired', async () => {
   const fake = await startFakeCdpServer();
   cleanups.push(() => fake.close());

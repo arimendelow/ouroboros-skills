@@ -514,11 +514,9 @@ export async function startLeaseProxy({
     throw error;
   }
   heartbeat = setInterval(() => {
-    heartbeatLeaseFn(stateDir, leaseId).catch(async (error) => {
-      if (error.code === 'LEASE_NOT_FOUND' || error.code === 'LEASE_EXPIRED') {
-        clearInterval(heartbeat);
-        await close();
-      }
+    heartbeatLeaseFn(stateDir, leaseId).catch(async () => {
+      clearInterval(heartbeat);
+      await close();
     });
   }, heartbeatIntervalMs);
   heartbeat.unref();

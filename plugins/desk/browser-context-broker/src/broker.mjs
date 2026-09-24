@@ -23,12 +23,27 @@ function hasExactKeys(value, expectedKeys) {
     actualKeys.every((key, index) => key === expectedKeys[index]);
 }
 
-function validateNonDestructiveRecovery(recovery) {
+function isCompleteRecoveryObservation(observation, declaration) {
+  const identity = observation?.processIdentity;
+  return observation?.contextId === declaration.id &&
+    typeof observation.endpoint === 'string' &&
+    observation.endpoint.length > 0 &&
+    Number.isSafeInteger(identity?.pid) &&
+    typeof identity.startIdentity === 'string' &&
+    identity.startIdentity.length > 0 &&
+    typeof identity.owner === 'string' &&
+    identity.owner.length > 0 &&
+    typeof identity.executable === 'string' &&
+    identity.executable.length > 0 &&
+    typeof identity.profileRoot === 'string' &&
+    identity.profileRoot.length > 0;
+}
+
+function validateNonDestructiveRecovery(recovery, declaration) {
   if (recovery?.recovered === true) {
     return hasExactKeys(recovery, ['mode', 'observation', 'recovered']) &&
       recovery.mode === 'non-destructive' &&
-      recovery.observation &&
-      typeof recovery.observation === 'object';
+      isCompleteRecoveryObservation(recovery.observation, declaration);
   }
   return recovery?.recovered === false &&
     hasExactKeys(recovery, ['mode', 'reason', 'recovered']) &&
@@ -262,7 +277,7 @@ async function acquireContextLocked({
         observation,
         reason: reconciled.reason,
       });
-      if (!validateNonDestructiveRecovery(nonDestructive)) {
+      if (!validateNonDestructiveRecovery(nonDestructive, declaration)) {
         throw new BrokerError(
           'CONTEXT_RECOVERY_FAILED',
           'Provider returned an invalid non-destructive recovery result',
@@ -290,6 +305,13 @@ async function acquireContextLocked({
           },
         );
         return publicResult(declaration, restored, 'reconnected');
+      }
+      if (nonDestructive.recovered === true) {
+        throw new BrokerError(
+          'CONTEXT_RECOVERY_FAILED',
+          'Provider reported successful non-destructive recovery without healthy fresh attestation',
+          { contextId: declaration.id },
+        );
       }
       const recoveryReason = nonDestructive?.reason;
       if (recoveryReason && !RECOVERABLE_REASONS.has(recoveryReason)) {
