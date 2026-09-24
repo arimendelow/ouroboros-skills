@@ -703,13 +703,24 @@ export async function removeOwnedTarget(stateDir, leaseId, targetId) {
 }
 
 export async function recordProxy(stateDir, leaseId, endpoint) {
-  return mutateLease(stateDir, leaseId, (lease) => {
-    lease.proxy = {
-      listener: endpoint,
-      pid: process.pid,
-      startIdentity: PROCESS_START_IDENTITY,
-      heartbeatAt: new Date().toISOString(),
-    };
+  return withLeaseOperation(stateDir, leaseId, () => {
+    return mutateLease(stateDir, leaseId, (lease) => {
+      if (lease.releasing) {
+        throw new BrokerError('LEASE_RELEASING', `Lease is being released: ${leaseId}`);
+      }
+      const now = new Date();
+      if (Date.parse(lease.expiresAt) <= now.getTime()) {
+        throw new BrokerError('LEASE_EXPIRED', `Lease has expired: ${leaseId}`);
+      }
+      lease.heartbeatAt = now.toISOString();
+      lease.expiresAt = new Date(now.getTime() + 300_000).toISOString();
+      lease.proxy = {
+        listener: endpoint,
+        pid: process.pid,
+        startIdentity: PROCESS_START_IDENTITY,
+        heartbeatAt: now.toISOString(),
+      };
+    });
   });
 }
 

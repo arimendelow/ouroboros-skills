@@ -16,6 +16,27 @@ const HUMAN_AUTH_REASONS = new Set([
   'HUMAN_AUTH_REQUIRED',
 ]);
 
+function hasExactKeys(value, expectedKeys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actualKeys = Object.keys(value).sort();
+  return actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key, index) => key === expectedKeys[index]);
+}
+
+function validateNonDestructiveRecovery(recovery) {
+  if (recovery?.recovered === true) {
+    return hasExactKeys(recovery, ['mode', 'observation', 'recovered']) &&
+      recovery.mode === 'non-destructive' &&
+      recovery.observation &&
+      typeof recovery.observation === 'object';
+  }
+  return recovery?.recovered === false &&
+    hasExactKeys(recovery, ['mode', 'reason', 'recovered']) &&
+    recovery.mode === 'non-destructive' &&
+    typeof recovery.reason === 'string' &&
+    recovery.reason.length > 0;
+}
+
 async function updateContext(stateDir, contextId, observation, metadata = {}) {
   await withBrokerLock(stateDir, async () => {
     const registry = await readRegistry(stateDir);
@@ -241,6 +262,13 @@ async function acquireContextLocked({
         observation,
         reason: reconciled.reason,
       });
+      if (!validateNonDestructiveRecovery(nonDestructive)) {
+        throw new BrokerError(
+          'CONTEXT_RECOVERY_FAILED',
+          'Provider returned an invalid non-destructive recovery result',
+          { contextId: declaration.id },
+        );
+      }
       const restored = await attestRecoveryObservation({
         declaration,
         recovery: nonDestructive,
@@ -264,17 +292,6 @@ async function acquireContextLocked({
         return publicResult(declaration, restored, 'reconnected');
       }
       const recoveryReason = nonDestructive?.reason;
-      if (
-        nonDestructive?.recovered !== false ||
-        typeof recoveryReason !== 'string' ||
-        recoveryReason.length === 0
-      ) {
-        throw new BrokerError(
-          'CONTEXT_RECOVERY_FAILED',
-          'Provider returned an invalid non-destructive recovery result',
-          { contextId: declaration.id },
-        );
-      }
       if (recoveryReason && !RECOVERABLE_REASONS.has(recoveryReason)) {
         const recoveryFailure = { reason: recoveryReason };
         failClosedAttestation(declaration, recoveryFailure);

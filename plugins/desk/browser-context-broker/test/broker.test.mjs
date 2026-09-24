@@ -441,7 +441,7 @@ test('recovers an unhealthy exact context destructively only when no active leas
         return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover' && payload.mode === 'non-destructive') {
-        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover' && payload.mode === 'restart') {
         assert.equal(payload.endpoint, newObservation.endpoint);
@@ -497,7 +497,9 @@ test('returns active lease owners instead of restarting an unhealthy shared cont
         operations.push(`${operation}${payload.mode ? `:${payload.mode}` : ''}`);
         if (operation === 'discover') return { found: true, observation };
         if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
-        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') {
+          return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
+        }
         throw new Error(`unexpected operation ${operation}`);
       },
     }),
@@ -551,7 +553,9 @@ test('an active lease from a different process generation still blocks destructi
       providerInvoker: async (operation) => {
         if (operation === 'discover') return { found: true, observation };
         if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
-        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') {
+          return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
+        }
         throw new Error(`unexpected operation ${operation}`);
       },
     }),
@@ -611,7 +615,7 @@ test('expired and releasing leases do not block destructive recovery', async () 
         return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover' && payload.mode === 'non-destructive') {
-        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover') {
         return { recovered: true, mode: 'restart', observation: newObservation };
@@ -646,7 +650,7 @@ test('retries destructive recovery on a provider-reported endpoint collision', a
         return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover' && payload.mode === 'non-destructive') {
-        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
       }
       if (operation === 'recover') {
         restartAttempt += 1;
@@ -881,7 +885,9 @@ test('non-destructive acquisition override cannot restart the protected context'
       providerInvoker: async (operation) => {
         if (operation === 'discover') return { found: true, observation };
         if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
-        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') {
+          return { recovered: false, mode: 'non-destructive', reason: 'ENDPOINT_UNHEALTHY' };
+        }
         throw new Error(`unexpected operation ${operation}`);
       },
     }),
@@ -939,6 +945,18 @@ for (const response of [
   { recovered: false },
   { recovered: true },
   { recovered: false, reason: 'UNKNOWN_RECOVERY_STATE' },
+  {
+    recovered: false,
+    mode: 'non-destructive',
+    reason: 'ENDPOINT_UNAVAILABLE',
+    code: 'HUMAN_AUTH_REQUIRED',
+  },
+  {
+    recovered: false,
+    mode: 'non-destructive',
+    reason: 'ENDPOINT_UNAVAILABLE',
+    observation: { endpoint: 'http://127.0.0.1:49999' },
+  },
 ]) {
   test(`malformed non-destructive response cannot authorize restart: ${JSON.stringify(response)}`, async () => {
     const directory = await stateDir();
