@@ -37,6 +37,32 @@ function sameProcessIdentity(left, right) {
   );
 }
 
+export function summarizeContextLeases(
+  registry,
+  contextId,
+  processIdentity,
+  now = Date.now(),
+) {
+  return Object.values(registry.leases)
+    .filter((lease) =>
+      lease.contextId === contextId &&
+      lease.releasing !== true &&
+      Number.isFinite(Date.parse(lease.expiresAt)) &&
+      Date.parse(lease.expiresAt) > now)
+    .map((lease) => ({
+      leaseId: lease.id,
+      owner: lease.owner,
+      heartbeatAt: lease.heartbeatAt,
+      expiresAt: lease.expiresAt,
+      targetCount: lease.targetIds?.length ?? 0,
+      processGenerationMatch: sameProcessIdentity(
+        lease.processIdentity,
+        processIdentity,
+      ),
+    }))
+    .sort((left, right) => left.leaseId.localeCompare(right.leaseId));
+}
+
 async function readLease(stateDir, leaseId) {
   const lease = (await readRegistry(stateDir)).leases[leaseId];
   if (!lease) throw new BrokerError('LEASE_NOT_FOUND', `Lease not found: ${leaseId}`, { leaseId });

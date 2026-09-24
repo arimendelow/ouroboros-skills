@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 
-import { acquireContext } from '../src/broker.mjs';
+import { acquireContext, acquireLease } from '../src/broker.mjs';
 import { invokeProvider } from '../src/provider.mjs';
 import { readRegistry, writeRegistry } from '../src/registry.mjs';
 
@@ -54,6 +54,19 @@ const unrelatedDeclaration = {
 const config = {
   contexts: [requestedDeclaration, unrelatedDeclaration],
   endpoint: { host: '127.0.0.1' },
+};
+
+const recoverableConfig = {
+  ...config,
+  contexts: [
+    {
+      ...requestedDeclaration,
+      recovery: {
+        restart: true,
+      },
+    },
+    unrelatedDeclaration,
+  ],
 };
 
 function processIdentity(declaration, pid = 100) {
@@ -350,4 +363,442 @@ test('context lock paths remain confined when a declaration ID contains path syn
   });
 
   assert.equal(result.context.id, unusualDeclaration.id);
+});
+
+test('acquireLease keeps the context lock until the lease exists', async () => {
+  const directory = await stateDir();
+  const observation = {
+    contextId: 'requested',
+    endpoint: 'http://127.0.0.1:49000',
+    processIdentity: processIdentity(requestedDeclaration, 1001),
+  };
+  let releaseFirstLease;
+  let firstLeaseStarted;
+  const firstLeaseGate = new Promise((resolve) => { releaseFirstLease = resolve; });
+  const firstLeaseEntered = new Promise((resolve) => { firstLeaseStarted = resolve; });
+  const operations = [];
+  let leaseNumber = 0;
+  const options = {
+    config,
+    request: { surface: 'work', identity: 'requested@example.test' },
+    stateDir: directory,
+    providerInvoker: async (operation) => {
+      operations.push(operation);
+      if (operation === 'discover') return { found: true, observation };
+      if (operation === 'attest') return healthy(requestedDeclaration, observation.endpoint, 1001);
+      throw new Error(`unexpected operation ${operation}`);
+    },
+    leaseCreator: async ({ owner }) => {
+      leaseNumber += 1;
+      if (owner === 'agent-a') {
+        firstLeaseStarted();
+        await firstLeaseGate;
+      }
+      return { id: `lease-${leaseNumber}` };
+    },
+  };
+
+  const first = acquireLease({ ...options, owner: 'agent-a' });
+  await firstLeaseEntered;
+  let secondSettled = false;
+  const second = acquireLease({ ...options, owner: 'agent-b' })
+    .finally(() => { secondSettled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assert.equal(secondSettled, false);
+  assert.deepEqual(operations, ['discover', 'attest']);
+
+  releaseFirstLease();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.notEqual(firstResult.lease.id, secondResult.lease.id);
+  assert.deepEqual(operations, ['discover', 'attest', 'discover', 'attest']);
+});
+
+test('recovers an unhealthy exact context destructively only when no active lease exists', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const oldObservation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49100',
+    processIdentity: processIdentity(declaration, 1101),
+  };
+  const newObservation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49101',
+    processIdentity: processIdentity(declaration, 1102),
+  };
+  const operations = [];
+
+  const result = await acquireContext({
+    config: recoverableConfig,
+    request: { surface: 'work', identity: 'requested@example.test' },
+    stateDir: directory,
+    endpointAllocator: async () => newObservation.endpoint,
+    providerInvoker: async (operation, payload) => {
+      operations.push(`${operation}${payload.mode ? `:${payload.mode}` : ''}`);
+      if (operation === 'discover') return { found: true, observation: oldObservation };
+      if (operation === 'attest' && payload.observation.processIdentity.pid === 1101) {
+        return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover' && payload.mode === 'non-destructive') {
+        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover' && payload.mode === 'restart') {
+        assert.equal(payload.endpoint, newObservation.endpoint);
+        return { recovered: true, mode: 'restart', observation: newObservation };
+      }
+      if (operation === 'attest') return healthy(declaration, newObservation.endpoint, 1102);
+      throw new Error(`unexpected operation ${operation}`);
+    },
+  });
+
+  assert.equal(result.rawEndpoint, newObservation.endpoint);
+  assert.equal(result.recovery, 'restarted');
+  assert.deepEqual(operations, [
+    'discover',
+    'attest',
+    'recover:non-destructive',
+    'recover:restart',
+    'attest',
+  ]);
+});
+
+test('returns active lease owners instead of restarting an unhealthy shared context', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49200',
+    processIdentity: processIdentity(declaration, 1201),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: observation },
+    leases: {
+      'lease-active': {
+        id: 'lease-active',
+        contextId: declaration.id,
+        owner: 'agent-a',
+        processIdentity: observation.processIdentity,
+        targetIds: ['target-a'],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation, payload) => {
+        operations.push(`${operation}${payload.mode ? `:${payload.mode}` : ''}`);
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'CONTEXT_RECOVERY_CONFLICT');
+      assert.equal(error.details.contextId, declaration.id);
+      assert.equal(error.details.reason, 'ENDPOINT_UNHEALTHY');
+      assert.deepEqual(error.details.leases, [{
+        leaseId: 'lease-active',
+        owner: 'agent-a',
+        heartbeatAt: error.details.leases[0].heartbeatAt,
+        expiresAt: error.details.leases[0].expiresAt,
+        targetCount: 1,
+        processGenerationMatch: true,
+      }]);
+      return true;
+    },
+  );
+  assert.deepEqual(operations, ['discover', 'attest', 'recover:non-destructive']);
+});
+
+test('an active lease from a different process generation still blocks destructive recovery', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49210',
+    processIdentity: processIdentity(declaration, 1211),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: observation },
+    leases: {
+      'lease-old-generation': {
+        id: 'lease-old-generation',
+        contextId: declaration.id,
+        owner: 'agent-old',
+        processIdentity: processIdentity(declaration, 1210),
+        targetIds: [],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) =>
+      error.code === 'CONTEXT_RECOVERY_CONFLICT' &&
+      error.details.leases[0].processGenerationMatch === false,
+  );
+});
+
+test('expired and releasing leases do not block destructive recovery', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const oldObservation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49220',
+    processIdentity: processIdentity(declaration, 1221),
+  };
+  const newObservation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49221',
+    processIdentity: processIdentity(declaration, 1222),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: oldObservation },
+    leases: {
+      expired: {
+        id: 'expired',
+        contextId: declaration.id,
+        owner: 'agent-expired',
+        processIdentity: oldObservation.processIdentity,
+        targetIds: [],
+        heartbeatAt: new Date(0).toISOString(),
+        expiresAt: new Date(0).toISOString(),
+      },
+      releasing: {
+        id: 'releasing',
+        contextId: declaration.id,
+        owner: 'agent-releasing',
+        processIdentity: oldObservation.processIdentity,
+        targetIds: [],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        releasing: true,
+      },
+    },
+  });
+
+  const result = await acquireContext({
+    config: recoverableConfig,
+    request: { surface: 'work', identity: 'requested@example.test' },
+    stateDir: directory,
+    endpointAllocator: async () => newObservation.endpoint,
+    providerInvoker: async (operation, payload) => {
+      if (operation === 'discover') return { found: true, observation: oldObservation };
+      if (operation === 'attest' && payload.observation.processIdentity.pid === 1221) {
+        return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover' && payload.mode === 'non-destructive') {
+        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover') {
+        return { recovered: true, mode: 'restart', observation: newObservation };
+      }
+      if (operation === 'attest') return healthy(declaration, newObservation.endpoint, 1222);
+      throw new Error(`unexpected operation ${operation}`);
+    },
+  });
+
+  assert.equal(result.recovery, 'restarted');
+});
+
+test('retries destructive recovery on a provider-reported endpoint collision', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const oldObservation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49230',
+    processIdentity: processIdentity(declaration, 1231),
+  };
+  const endpoints = ['http://127.0.0.1:49231', 'http://127.0.0.1:49232'];
+  let restartAttempt = 0;
+
+  const result = await acquireContext({
+    config: recoverableConfig,
+    request: { surface: 'work', identity: 'requested@example.test' },
+    stateDir: directory,
+    endpointAllocator: async () => endpoints.shift(),
+    providerInvoker: async (operation, payload) => {
+      if (operation === 'discover') return { found: true, observation: oldObservation };
+      if (operation === 'attest' && payload.observation.processIdentity.pid === 1231) {
+        return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover' && payload.mode === 'non-destructive') {
+        return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+      }
+      if (operation === 'recover') {
+        restartAttempt += 1;
+        if (restartAttempt === 1) {
+          const error = new Error('collision');
+          error.code = 'ENDPOINT_COLLISION';
+          throw error;
+        }
+        const observation = {
+          contextId: declaration.id,
+          endpoint: payload.endpoint,
+          processIdentity: processIdentity(declaration, 1232),
+        };
+        return { recovered: true, mode: 'restart', observation };
+      }
+      if (operation === 'attest') return healthy(declaration, payload.observation.endpoint, 1232);
+      throw new Error(`unexpected operation ${operation}`);
+    },
+  });
+
+  assert.equal(restartAttempt, 2);
+  assert.equal(result.rawEndpoint, 'http://127.0.0.1:49232');
+  assert.equal((await readRegistry(directory)).contexts.requested.endpoint, result.rawEndpoint);
+});
+
+test('reuses a context restored by non-destructive recovery with active leases', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49300',
+    processIdentity: processIdentity(declaration, 1301),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: observation },
+    leases: {
+      'lease-active': {
+        id: 'lease-active',
+        contextId: declaration.id,
+        owner: 'agent-a',
+        processIdentity: observation.processIdentity,
+        targetIds: [],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+  let attestationCount = 0;
+
+  const result = await acquireContext({
+    config: recoverableConfig,
+    request: { surface: 'work', identity: 'requested@example.test' },
+    stateDir: directory,
+    providerInvoker: async (operation, payload) => {
+      if (operation === 'discover') return { found: true, observation };
+      if (operation === 'attest') {
+        attestationCount += 1;
+        return attestationCount === 1
+          ? { healthy: false, reason: 'ENDPOINT_UNHEALTHY' }
+          : healthy(declaration, observation.endpoint, 1301);
+      }
+      if (operation === 'recover') {
+        assert.equal(payload.mode, 'non-destructive');
+        return { recovered: true, mode: 'non-destructive', observation };
+      }
+      throw new Error(`unexpected operation ${operation}`);
+    },
+  });
+
+  assert.equal(result.recovery, 'reconnected');
+  assert.equal(result.rawEndpoint, observation.endpoint);
+});
+
+test('never restarts a context when browser-visible claims require human auth', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49400',
+    processIdentity: processIdentity(declaration, 1401),
+  };
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        operations.push(operation);
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') return { healthy: false, reason: 'HUMAN_AUTH_REQUIRED' };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'HUMAN_AUTH_REQUIRED',
+  );
+  assert.deepEqual(operations, ['discover', 'attest']);
+});
+
+test('never restarts a context when browser-visible attestation is indeterminate', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49410',
+    processIdentity: processIdentity(declaration, 1411),
+  };
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        operations.push(operation);
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') {
+          return { healthy: false, reason: 'VISIBLE_ATTESTATION_INDETERMINATE' };
+        }
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'VISIBLE_ATTESTATION_INDETERMINATE',
+  );
+  assert.deepEqual(operations, ['discover', 'attest']);
+});
+
+test('non-destructive acquisition override cannot restart the protected context', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49500',
+    processIdentity: processIdentity(declaration, 1501),
+  };
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      recoveryMode: 'non-destructive',
+      providerInvoker: async (operation) => {
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+        if (operation === 'recover') return { recovered: false, reason: 'ENDPOINT_UNHEALTHY' };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'DESTRUCTIVE_RECOVERY_DISABLED',
+  );
 });
