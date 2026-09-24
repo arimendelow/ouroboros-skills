@@ -88,6 +88,8 @@ export async function startLeaseProxy({
   port = 0,
   internalRequestTimeoutMs = DEFAULT_INTERNAL_REQUEST_TIMEOUT_MS,
   recordProxyFn = recordProxy,
+  heartbeatLeaseFn = heartbeatLease,
+  heartbeatIntervalMs = 10_000,
 }) {
   const lease = await attestLeaseContext({
     stateDir,
@@ -512,13 +514,13 @@ export async function startLeaseProxy({
     throw error;
   }
   heartbeat = setInterval(() => {
-    heartbeatLease(stateDir, leaseId).catch(async (error) => {
-      if (error.code === 'LEASE_NOT_FOUND') {
+    heartbeatLeaseFn(stateDir, leaseId).catch(async (error) => {
+      if (error.code === 'LEASE_NOT_FOUND' || error.code === 'LEASE_EXPIRED') {
         clearInterval(heartbeat);
         await close();
       }
     });
-  }, 10_000);
+  }, heartbeatIntervalMs);
   heartbeat.unref();
 
   return {
