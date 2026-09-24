@@ -275,14 +275,20 @@ test('repairs stale registry state only for the requested context', async () => 
   let launched = false;
 
   const result = await acquireContext({
-    config,
+    config: {
+      ...config,
+      contexts: config.contexts.map((declaration) =>
+        declaration.id === 'requested'
+          ? { ...declaration, recovery: { restart: true } }
+          : declaration),
+    },
     request: { surface: 'work', identity: 'requested@example.test' },
     stateDir: directory,
     endpointAllocator: async () => 'http://127.0.0.1:46000',
     providerInvoker: async (operation, payload) => {
       if (operation === 'discover') return { found: true, observation: payload.observation };
       if (operation === 'attest' && !launched) return { healthy: false, reason: 'PROCESS_ABSENT' };
-      if (operation === 'launch') {
+      if (operation === 'recover' && payload.mode === 'restart') {
         launched = true;
         return {
           observation: {
@@ -297,7 +303,7 @@ test('repairs stale registry state only for the requested context', async () => 
     },
   });
 
-  assert.equal(result.recovery, 'recovered');
+  assert.equal(result.recovery, 'restarted');
   const registry = await readRegistry(directory);
   assert.equal(registry.contexts.requested.endpoint, 'http://127.0.0.1:46000');
   assert.equal(registry.contexts.unrelated.endpoint, 'http://127.0.0.1:41001');
@@ -662,6 +668,75 @@ test('a releasing lease blocks destructive recovery until release completes', as
       error.code === 'CONTEXT_RECOVERY_CONFLICT' &&
       error.details.leases[0].leaseId === 'releasing' &&
       error.details.leases[0].releasing === true,
+  );
+});
+
+test('a missing previously observed context cannot bypass non-destructive recovery mode', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: {
+      requested: {
+        contextId: declaration.id,
+        endpoint: 'http://127.0.0.1:49226',
+        processIdentity: processIdentity(declaration, 1226),
+      },
+    },
+    leases: {},
+  });
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      recoveryMode: 'non-destructive',
+      providerInvoker: async (operation) => {
+        operations.push(operation);
+        if (operation === 'discover') return { found: false };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'DESTRUCTIVE_RECOVERY_DISABLED',
+  );
+  assert.deepEqual(operations, ['discover']);
+});
+
+test('a missing context with an active lease cannot launch a replacement', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const previousIdentity = processIdentity(declaration, 1227);
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: {},
+    leases: {
+      active: {
+        id: 'active',
+        contextId: declaration.id,
+        owner: 'agent-active',
+        processIdentity: previousIdentity,
+        targetIds: ['owned-target'],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        if (operation === 'discover') return { found: false };
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) =>
+      error.code === 'CONTEXT_RECOVERY_CONFLICT' &&
+      error.details.leases[0].leaseId === 'active',
   );
 });
 

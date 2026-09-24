@@ -377,9 +377,52 @@ async function acquireContextLocked({
       );
     }
     recovery = 'recovered';
+  }
+
+  const replacementObservation = observation ?? registryObservation;
+  const blockingLeases = summarizeContextLeases(
+    registry,
+    declaration.id,
+    replacementObservation?.processIdentity,
+  );
+  if (replacementObservation || blockingLeases.length > 0) {
+    if (blockingLeases.length > 0) {
+      throw new BrokerError(
+        'CONTEXT_RECOVERY_CONFLICT',
+        'The requested browser context is absent and has active leases',
+        {
+          contextId: declaration.id,
+          reason: 'PROCESS_ABSENT',
+          leases: blockingLeases,
+        },
+      );
+    }
+    if (recoveryMode === 'non-destructive') {
+      throw new BrokerError(
+        'DESTRUCTIVE_RECOVERY_DISABLED',
+        'The requested browser context is absent and replacement is disabled',
+        { contextId: declaration.id, reason: 'PROCESS_ABSENT' },
+      );
+    }
+    if (declaration.recovery?.restart !== true) {
+      throw new BrokerError(
+        'UNSUPPORTED_CONTEXT_RECOVERY',
+        'The requested browser context does not authorize replacement',
+        { contextId: declaration.id, reason: 'PROCESS_ABSENT' },
+      );
+    }
     await updateContext(stateDir, declaration.id, undefined);
-  } else if (registryObservation) {
-    await updateContext(stateDir, declaration.id, undefined);
+    return provisionContext({
+      config,
+      declaration,
+      stateDir,
+      providerInvoker,
+      endpointAllocator,
+      operation: 'recover',
+      observation: replacementObservation,
+      reason: 'PROCESS_ABSENT',
+      recovery: 'restarted',
+    });
   }
 
   return provisionContext({
