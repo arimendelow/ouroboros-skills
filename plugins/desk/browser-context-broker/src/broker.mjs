@@ -72,7 +72,11 @@ function failClosedAttestation(declaration, reconciled) {
       { contextId: declaration.id, reason },
     );
   }
-  if (reason === 'VISIBLE_CLAIM_MISMATCH' || reason === 'VISIBLE_ATTESTATION_INDETERMINATE') {
+  if (
+    reason === 'VISIBLE_CLAIM_MISMATCH' ||
+    reason === 'VISIBLE_ATTESTATION_INDETERMINATE' ||
+    reason === 'VISIBLE_ATTESTATION_CLEANUP_FAILED'
+  ) {
     throw new BrokerError(
       reason,
       'The requested browser context did not prove its configured visible claims',
@@ -81,10 +85,21 @@ function failClosedAttestation(declaration, reconciled) {
   }
 }
 
+function sameProcessIdentity(left, right) {
+  return (
+    left?.pid === right?.pid &&
+    left?.startIdentity === right?.startIdentity &&
+    left?.owner === right?.owner &&
+    left?.executable === right?.executable &&
+    left?.profileRoot === right?.profileRoot
+  );
+}
+
 async function attestRecoveryObservation({
   declaration,
   recovery,
   providerInvoker,
+  expectedProcessIdentity,
 }) {
   if (!recovery?.recovered || !recovery.observation) return undefined;
   const reconciled = await reconcileContext(
@@ -95,6 +110,20 @@ async function attestRecoveryObservation({
   if (reconciled.status !== 'healthy') {
     failClosedAttestation(declaration, reconciled);
     return undefined;
+  }
+  if (
+    expectedProcessIdentity &&
+    !sameProcessIdentity(reconciled.processIdentity, expectedProcessIdentity)
+  ) {
+    throw new BrokerError(
+      'RECOVERY_PROCESS_CHANGED',
+      'Non-destructive recovery changed the browser process generation',
+      {
+        contextId: declaration.id,
+        expected: expectedProcessIdentity,
+        actual: reconciled.processIdentity,
+      },
+    );
   }
   return reconciled;
 }
@@ -216,6 +245,7 @@ async function acquireContextLocked({
         declaration,
         recovery: nonDestructive,
         providerInvoker,
+        expectedProcessIdentity: observation.processIdentity,
       });
       if (restored) {
         await updateContext(
@@ -277,6 +307,13 @@ async function acquireContextLocked({
         reason: reconciled.reason,
         recovery: 'restarted',
       });
+    }
+    if (reconciled.reason !== 'PROCESS_ABSENT') {
+      throw new BrokerError(
+        'LAUNCH_ATTESTATION_FAILED',
+        'The requested browser context failed attestation and cannot be reprovisioned safely',
+        { contextId: declaration.id, reason: reconciled.reason },
+      );
     }
     recovery = 'recovered';
     await updateContext(stateDir, declaration.id, undefined);

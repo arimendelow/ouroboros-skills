@@ -720,6 +720,9 @@ export async function heartbeatLease(stateDir, leaseId, ttlMs = 300_000) {
         throw new BrokerError('LEASE_RELEASING', `Lease is being released: ${leaseId}`);
       }
       const now = new Date();
+      if (Date.parse(lease.expiresAt) <= now.getTime()) {
+        throw new BrokerError('LEASE_EXPIRED', `Lease has expired: ${leaseId}`);
+      }
       lease.heartbeatAt = now.toISOString();
       lease.expiresAt = new Date(now.getTime() + ttlMs).toISOString();
       if (lease.proxy) lease.proxy.heartbeatAt = now.toISOString();

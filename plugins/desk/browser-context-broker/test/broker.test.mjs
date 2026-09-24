@@ -721,6 +721,92 @@ test('reuses a context restored by non-destructive recovery with active leases',
   assert.equal(result.rawEndpoint, observation.endpoint);
 });
 
+test('rejects non-destructive recovery that changes the process generation', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49310',
+    processIdentity: processIdentity(declaration, 1311),
+  };
+  let attestationCount = 0;
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation, payload) => {
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') {
+          attestationCount += 1;
+          return attestationCount === 1
+            ? { healthy: false, reason: 'ENDPOINT_UNHEALTHY' }
+            : healthy(declaration, payload.observation.endpoint, 1312);
+        }
+        if (operation === 'recover') {
+          return {
+            recovered: true,
+            mode: 'non-destructive',
+            observation: {
+              ...observation,
+              processIdentity: processIdentity(declaration, 1312),
+            },
+          };
+        }
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) => error.code === 'RECOVERY_PROCESS_CHANGED',
+  );
+});
+
+test('fails closed on endpoint-process mismatch instead of launching beside an active lease', async () => {
+  const directory = await stateDir();
+  const declaration = recoverableConfig.contexts[0];
+  const observation = {
+    contextId: declaration.id,
+    endpoint: 'http://127.0.0.1:49320',
+    processIdentity: processIdentity(declaration, 1321),
+  };
+  await writeRegistry(directory, {
+    version: 1,
+    contexts: { requested: observation },
+    leases: {
+      'lease-active': {
+        id: 'lease-active',
+        contextId: declaration.id,
+        owner: 'agent-a',
+        processIdentity: observation.processIdentity,
+        targetIds: [],
+        heartbeatAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    },
+  });
+  const operations = [];
+
+  await assert.rejects(
+    acquireContext({
+      config: recoverableConfig,
+      request: { surface: 'work', identity: 'requested@example.test' },
+      stateDir: directory,
+      providerInvoker: async (operation) => {
+        operations.push(operation);
+        if (operation === 'discover') return { found: true, observation };
+        if (operation === 'attest') {
+          return { healthy: false, reason: 'ENDPOINT_PROCESS_MISMATCH' };
+        }
+        throw new Error(`unexpected operation ${operation}`);
+      },
+    }),
+    (error) =>
+      error.code === 'LAUNCH_ATTESTATION_FAILED' &&
+      error.details.reason === 'ENDPOINT_PROCESS_MISMATCH',
+  );
+  assert.deepEqual(operations, ['discover', 'attest']);
+});
+
 test('never restarts a context when browser-visible claims require human auth', async () => {
   const directory = await stateDir();
   const declaration = recoverableConfig.contexts[0];
