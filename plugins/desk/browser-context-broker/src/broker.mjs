@@ -263,6 +263,16 @@ async function acquireContextLocked({
         );
         return publicResult(declaration, restored, 'reconnected');
       }
+      const recoveryReason = nonDestructive?.reason;
+      if (recoveryReason && !RECOVERABLE_REASONS.has(recoveryReason)) {
+        const recoveryFailure = { reason: recoveryReason };
+        failClosedAttestation(declaration, recoveryFailure);
+        throw new BrokerError(
+          'LAUNCH_ATTESTATION_FAILED',
+          'Non-destructive recovery produced an unsafe attestation state',
+          { contextId: declaration.id, reason: recoveryReason },
+        );
+      }
 
       const currentRegistry = await readRegistry(stateDir);
       const leases = summarizeContextLeases(

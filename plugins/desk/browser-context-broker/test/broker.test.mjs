@@ -888,3 +888,47 @@ test('non-destructive acquisition override cannot restart the protected context'
     (error) => error.code === 'DESTRUCTIVE_RECOVERY_DISABLED',
   );
 });
+
+for (const reason of [
+  'HUMAN_AUTH_REQUIRED',
+  'VISIBLE_CLAIM_MISMATCH',
+  'VISIBLE_ATTESTATION_INDETERMINATE',
+  'VISIBLE_ATTESTATION_CLEANUP_FAILED',
+  'ENDPOINT_PROCESS_MISMATCH',
+]) {
+  test(`failed non-destructive recovery does not restart after escalating to ${reason}`, async () => {
+    const directory = await stateDir();
+    const declaration = recoverableConfig.contexts[0];
+    const observation = {
+      contextId: declaration.id,
+      endpoint: 'http://127.0.0.1:49430',
+      processIdentity: processIdentity(declaration, 1431),
+    };
+    const operations = [];
+
+    await assert.rejects(
+      acquireContext({
+        config: recoverableConfig,
+        request: { surface: 'work', identity: 'requested@example.test' },
+        stateDir: directory,
+        providerInvoker: async (operation, payload) => {
+          operations.push(operation);
+          if (operation === 'discover') return { found: true, observation };
+          if (operation === 'attest') {
+            return { healthy: false, reason: 'ENDPOINT_UNHEALTHY' };
+          }
+          if (operation === 'recover' && payload.mode === 'non-destructive') {
+            return { recovered: false, mode: 'non-destructive', reason };
+          }
+          throw new Error(`unexpected operation ${operation}`);
+        },
+      }),
+      (error) => error.code === (
+        reason === 'ENDPOINT_PROCESS_MISMATCH'
+          ? 'LAUNCH_ATTESTATION_FAILED'
+          : reason
+      ),
+    );
+    assert.deepEqual(operations, ['discover', 'attest', 'recover']);
+  });
+}
