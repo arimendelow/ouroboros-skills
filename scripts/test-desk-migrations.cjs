@@ -3,9 +3,10 @@
 
 // Exercises Desk's session-start migrations without touching a real Claude or
 // Agency configuration. A fake `claude` placed first on PATH records every call,
-// keeps installed plugins and marketplaces in files this test controls, and can
-// fail chosen commands; HOME, CLAUDE_CONFIG_DIR and AGENCY_TOML all point into a
-// temporary directory.
+// keeps installed plugins, their manifests and marketplaces in files this test
+// controls, models marketplace-scoped dependency errors, and can fail chosen
+// commands; HOME, CLAUDE_CONFIG_DIR and AGENCY_TOML all point into a temporary
+// directory.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -29,10 +30,14 @@ function which(tool) {
 const BASH = which("bash");
 assert.ok(which("jq"), "the migration harness needs jq, as Desk's session start does");
 
+// Dependencies each plugin's manifest declares, as on the v2-alpha marketplace.
+// Work Suite depends on Plain Language and Ponytail from its own marketplace.
 const FAKE_CLAUDE = `#!/usr/bin/env bash
-# Test double for the Claude Code CLI. Records every call, keeps installed plugins
-# ("<id> <scope>" lines) in a state file and marketplaces in the config files the
-# real CLI writes, and fails any call matching the FAKE_CLAUDE_FAIL regex.
+# Test double for the Claude Code CLI. Records every call. Keeps installed plugins
+# as "<id>|<scope>|<project path>" lines in a state file, writes each plugin's
+# manifest to its install path, keeps marketplaces in the config files the real
+# CLI writes, reports marketplace-scoped dependency errors, and fails any call
+# matching the FAKE_CLAUDE_FAIL regex.
 printf '%s\\n' "$*" >> "$FAKE_CLAUDE_LOG"
 if [ -n "\${FAKE_CLAUDE_FAIL:-}" ] && printf '%s\\n' "$*" | grep -Eq "$FAKE_CLAUDE_FAIL"; then
   echo "fake claude: failing $*" >&2
@@ -57,23 +62,50 @@ while [ $# -gt 0 ]; do
     *) pos+=("$1"); shift ;;
   esac
 done
+here="$(pwd -P)"
 edit() {
   local file="$1"; shift
   [ -s "$file" ] || { mkdir -p "$(dirname "$file")"; echo '{}' > "$file"; }
   jq "$@" "$file" > "$file.next" && mv "$file.next" "$file"
 }
 has_marketplace() { [ -s "$known" ] && jq -e --arg n "$1" 'has($n)' "$known" >/dev/null; }
-add_plugin() { grep -q "^$1 " "$state" || printf '%s %s\\n' "$1" "$2" >> "$state"; }
+install_path() { printf '%s/plugins/cache/%s/%s/0.0.0' "$cfg" "\${1#*@}" "\${1%@*}"; }
+deps_of() {
+  case "$1" in
+    desk) echo "superpowers plain-language" ;;
+    work-suite) echo "plain-language ponytail-upstream" ;;
+  esac
+}
+manifest_deps() { jq -r '.dependencies[]? | if type == "string" then . else .name end' "$(install_path "$1")/.claude-plugin/plugin.json" 2>/dev/null; }
+installed() { grep -q "^$1|" "$state"; }
+add_plugin() {
+  local id="$1" sc="$2" project=""
+  [ "$sc" = user ] || project="$here"
+  installed "$id" || printf '%s|%s|%s\\n' "$id" "$sc" "$project" >> "$state"
+  local dir; dir="$(install_path "$id")/.claude-plugin"
+  mkdir -p "$dir"
+  jq -n --arg n "\${id%@*}" --arg d "$(deps_of "\${id%@*}")" '{name: $n, dependencies: ($d | split(" ") | map(select(length > 0)) | map({name: ., version: "0.0.0"}))}' > "$dir/plugin.json"
+}
 case "$cmd" in
   list)
     if [ "$json" = 1 ]; then
-      jq -Rn '[inputs | select(length > 0) | split(" ") | {id: .[0], scope: .[1], enabled: true}]' < "$state"
+      out="[]"
+      while IFS='|' read -r id sc project; do
+        [ -n "$id" ] || continue
+        errs="[]"
+        for dep in $(manifest_deps "$id"); do
+          installed "$dep@\${id#*@}" || errs="$(jq -c --arg e "Dependency \\"$dep@\${id#*@}\\" is not installed" '. + [$e]' <<< "$errs")"
+        done
+        out="$(jq -c --arg id "$id" --arg sc "$sc" --arg pp "$project" --arg ip "$(install_path "$id")" --argjson errs "$errs" \\
+          '. + [{id: $id, scope: $sc, enabled: true, installPath: $ip} + (if $pp == "" then {} else {projectPath: $pp} end) + (if ($errs | length) > 0 then {errors: $errs} else {} end)]' <<< "$out")"
+      done < "$state"
+      printf '%s\\n' "$out"
     elif [ ! -s "$state" ]; then
       echo "No plugins installed."
     else
       printf 'Installed plugins:\\n\\n'
-      while read -r id s; do
-        printf '  \\342\\235\\257 %s\\n    Version: 0.0.0\\n    Scope: %s\\n    Status: \\342\\234\\224 enabled\\n\\n' "$id" "$s"
+      while IFS='|' read -r id sc project; do
+        printf '  \\342\\235\\257 %s\\n    Version: 0.0.0\\n    Scope: %s\\n    Status: \\342\\234\\224 enabled\\n\\n' "$id" "$sc"
       done < "$state"
     fi
     ;;
@@ -81,15 +113,24 @@ case "$cmd" in
     id="\${pos[0]}"
     has_marketplace "\${id#*@}" || { echo "Marketplace \${id#*@} not found" >&2; exit 1; }
     add_plugin "$id" "$scope"
-    if [ "$id" = desk@ourostack ] && [ -z "\${FAKE_CLAUDE_NO_DEPS:-}" ]; then
-      add_plugin superpowers@ourostack user
-      add_plugin plain-language@ourostack user
+    if [ -z "\${FAKE_CLAUDE_NO_DEPS:-}" ]; then
+      for dep in $(deps_of "\${id%@*}"); do add_plugin "$dep@\${id#*@}" user; done
     fi
     ;;
   uninstall)
     id="\${pos[0]}"
-    grep -qx "$id $scope" "$state" || { echo "Plugin \\"$id\\" is not installed in $scope scope" >&2; exit 1; }
-    grep -vx "$id $scope" "$state" > "$state.next"; mv "$state.next" "$state"
+    line="$(grep "^$id|$scope|" "$state" | head -n 1)"
+    [ -n "$line" ] || { echo "Plugin \\"$id\\" is not installed in $scope scope" >&2; exit 1; }
+    project="\${line##*|}"
+    if [ -n "$project" ] && [ "$project" != "$here" ]; then echo "Plugin \\"$id\\" is not installed in this project" >&2; exit 1; fi
+    grep -vxF "$line" "$state" > "$state.next"; mv "$state.next" "$state"
+    # Like the real CLI: removing a plugin another plugin depends on only warns.
+    while IFS='|' read -r other sc pp; do
+      [ "\${other#*@}" = "\${id#*@}" ] || continue
+      for dep in $(manifest_deps "$other"); do
+        [ "$dep" = "\${id%@*}" ] && echo "warning: $id is required by $other" >&2
+      done
+    done < "$state"
     ;;
   marketplace-add)
     src="\${pos[0]}"; repo="\${src%%#*}"
@@ -110,7 +151,7 @@ case "$cmd" in
     has_marketplace "$name" || { echo "Marketplace $name not found" >&2; exit 1; }
     edit "$known" --arg n "$name" 'del(.[$n])'
     edit "$settings" --arg n "$name" 'del(.extraKnownMarketplaces[$n])'
-    grep -v "@$name " "$state" > "$state.next"; mv "$state.next" "$state"
+    grep -v "^[^|]*@$name|" "$state" > "$state.next"; mv "$state.next" "$state"
     ;;
   *)
     echo "fake claude: unexpected arguments: plugin $cmd" >&2
@@ -157,31 +198,33 @@ function parseMigration(file) {
   return { frontmatter, blocks };
 }
 
-// Tools the migration blocks use, for the sandbox where claude is absent from PATH.
-const BLOCK_TOOLS = ["bash", "sh", "grep", "sed", "awk", "cp", "cat", "rm", "mv", "mkdir", "mktemp", "dirname", "head", "jq", "git"];
+// Tools the migration blocks and the fake use, for sandboxes with a restricted PATH.
+const BLOCK_TOOLS = ["bash", "sh", "grep", "sed", "awk", "cp", "cat", "rm", "mv", "mkdir", "mktemp", "dirname", "head", "jq", "git", "sort", "paste", "tr", "touch"];
 
 function makeSandbox({
   installed = [],
   oldRef,
-  oldAutoUpdate = true,
   agencyToml = null,
   agencyBak = null,
   symlinkToml = false,
   oldBinding = null,
   newBinding = null,
   claude = true,
+  withoutJq = false,
   fail = "",
   noDeps = false,
 } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desk-migration-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "desk-migration-")));
   const bin = path.join(root, "bin");
   const home = path.join(root, "home");
   const cfg = path.join(root, "claude-config");
-  for (const dir of [bin, home, cfg]) fs.mkdirSync(dir);
+  const project = path.join(root, "project");
+  for (const dir of [bin, home, cfg, project]) fs.mkdirSync(dir);
   const sandbox = {
     root,
     home,
     cfg,
+    project,
     fakeClaude: path.join(bin, "claude"),
     state: path.join(root, "claude-installed.txt"),
     log: path.join(root, "claude-calls.log"),
@@ -195,16 +238,9 @@ function makeSandbox({
   if (claude) fs.writeFileSync(sandbox.fakeClaude, FAKE_CLAUDE, { mode: 0o755 });
   // The Safety check requires gh; a stub keeps the test independent of the runner's tools.
   fs.writeFileSync(path.join(bin, "gh"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
-  fs.writeFileSync(sandbox.state, installed.map((entry) => `${entry.includes(" ") ? entry : `${entry} user`}\n`).join(""));
+  fs.writeFileSync(sandbox.state, "");
   fs.writeFileSync(sandbox.log, "");
-  const settings = { autoMemoryEnabled: false, hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo mine" }] }] } };
-  if (oldRef !== undefined) {
-    const source = { source: "github", repo: "ourostack/ouroboros-skills", ...(oldRef ? { ref: oldRef } : {}) };
-    settings.extraKnownMarketplaces = { "ouroboros-skills": { source, ...(oldAutoUpdate ? { autoUpdate: true } : {}) } };
-    fs.mkdirSync(path.dirname(sandbox.known), { recursive: true });
-    fs.writeFileSync(sandbox.known, `${JSON.stringify({ "ouroboros-skills": { source } }, null, 2)}\n`);
-  }
-  fs.writeFileSync(sandbox.settings, `${JSON.stringify(settings, null, 2)}\n`);
+  fs.writeFileSync(sandbox.settings, `${JSON.stringify({ autoMemoryEnabled: false, hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo mine" }] }] } }, null, 2)}\n`);
   if (agencyToml !== null) {
     if (symlinkToml) {
       fs.mkdirSync(path.dirname(sandbox.tomlTarget));
@@ -221,11 +257,12 @@ function makeSandbox({
     fs.writeFileSync(file, content);
   }
   let searchPath = `${bin}${path.delimiter}${process.env.PATH}`;
-  if (!claude) {
-    // A PATH holding only the tools the blocks use, so no real claude can be found.
+  if (!claude || withoutJq) {
+    // A PATH holding only the tools the blocks use, so no real claude (or, if asked, no jq) can be found.
     const tools = path.join(root, "tools");
     fs.mkdirSync(tools);
     for (const tool of BLOCK_TOOLS) {
+      if (withoutJq && tool === "jq") continue;
       const found = which(tool);
       if (found) fs.symlinkSync(found, path.join(tools, tool));
     }
@@ -233,15 +270,38 @@ function makeSandbox({
   }
   sandbox.env = {
     ...process.env,
-    PATH: searchPath,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
     HOME: home,
     CLAUDE_CONFIG_DIR: cfg,
     AGENCY_TOML: sandbox.toml,
     FAKE_CLAUDE_LOG: sandbox.log,
     FAKE_CLAUDE_STATE: sandbox.state,
-    FAKE_CLAUDE_FAIL: fail,
+    FAKE_CLAUDE_FAIL: "",
     FAKE_CLAUDE_NO_DEPS: noDeps ? "1" : "",
   };
+  // Seed the old install through the fake itself, as a user would have: the old marketplace, then each plugin.
+  if (claude && oldRef !== undefined) {
+    const seed = (args, cwd = root) => {
+      const result = spawnSync(sandbox.fakeClaude, args, { cwd, env: sandbox.env, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+    };
+    seed(["plugin", "marketplace", "add", `ourostack/ouroboros-skills${oldRef ? `#${oldRef}` : ""}`]);
+    const settings = json(sandbox.settings);
+    settings.extraKnownMarketplaces["ouroboros-skills"].autoUpdate = true;
+    fs.writeFileSync(sandbox.settings, `${JSON.stringify(settings, null, 2)}\n`);
+    for (const entry of installed) {
+      const [id, scope = "user"] = entry.split(" ");
+      seed(["plugin", "install", "--scope", scope, id], scope === "user" ? root : project);
+    }
+    fs.writeFileSync(sandbox.log, "");
+  } else if (claude) {
+    for (const entry of installed) {
+      const [id, scope = "user"] = entry.split(" ");
+      fs.appendFileSync(sandbox.state, `${id}|${scope}|\n`);
+    }
+  }
+  sandbox.env.PATH = searchPath;
+  sandbox.env.FAKE_CLAUDE_FAIL = fail;
   // Guard: never let a migration block reach the operator's real CLI or configuration.
   const resolved = spawnSync(BASH, ["-c", "command -v claude"], { env: sandbox.env, encoding: "utf8" });
   assert.equal(resolved.stdout.trim(), claude ? sandbox.fakeClaude : "", "only the fake claude may be reachable");
@@ -255,13 +315,17 @@ function run(sandbox, script) {
   return spawnSync(BASH, ["-c", script], { cwd: sandbox.root, env: sandbox.env, encoding: "utf8" });
 }
 
-// The session-start-migrations driver: Detect, then Safety check, Migrate and Announce when Detect fires.
+// The session-start-migrations driver: Detect; when it fires, Safety check and Migrate; on success, Migrate's report, then Announce verbatim.
 function drive(sandbox, blocks) {
   if (run(sandbox, blocks.Detect).status !== 0) return { fired: false };
   const safety = run(sandbox, blocks["Safety check"]);
   assert.equal(safety.status, 0, safety.stdout + safety.stderr);
   const migrate = run(sandbox, blocks.Migrate);
-  return { fired: true, migrate, announce: migrate.status === 0 ? blocks.Announce : null };
+  return {
+    fired: true,
+    migrate,
+    shown: migrate.status === 0 ? `${migrate.stdout}${blocks.Announce}` : null,
+  };
 }
 
 function calls(sandbox) {
@@ -272,8 +336,19 @@ function mutatingCalls(sandbox) {
   return calls(sandbox).filter((line) => !/^plugin list/u.test(line));
 }
 
+function pluginList(sandbox) {
+  const result = spawnSync(sandbox.fakeClaude, ["plugin", "list", "--json"], { env: sandbox.env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
 function installedIds(sandbox) {
-  return fs.readFileSync(sandbox.state, "utf8").split("\n").filter(Boolean).sort();
+  return pluginList(sandbox).map((plugin) => `${plugin.id} ${plugin.scope}`).sort();
+}
+
+function assertNoLoadErrors(sandbox) {
+  const broken = pluginList(sandbox).filter((plugin) => plugin.errors?.length);
+  assert.deepEqual(broken.map((plugin) => `${plugin.id}: ${plugin.errors.join("; ")}`), [], "every remaining plugin must still load");
 }
 
 function read(file) {
@@ -306,6 +381,7 @@ for (const name of migrationFiles) {
 function moveMigration() {
   const migration = parseMigration(MOVE_FILE);
   assert.equal(migration.frontmatter.needs_restart, "true");
+  assert.doesNotMatch(migration.blocks.Announce, /Claude Code|Agency|agency\.toml|Work Suite/u, "Announce is shown on every machine, so it names no side that may not have moved");
   return migration.blocks;
 }
 
@@ -333,12 +409,11 @@ const V1_LINES = [
 const OLD_TOML = toml([V2("desk"), V2("superpowers"), V2("plain-language"), V2("crew"), ...V1_LINES]);
 const NEW_TOML = toml([MOVED("desk"), MOVED("superpowers"), MOVED("plain-language"), MOVED("crew"), ...V1_LINES]);
 const USER_BAK = "# the user's own agency.toml.bak\n";
-const V2_CLAUDE = ["desk@ouroboros-skills", "superpowers@ouroboros-skills", "plain-language@ouroboros-skills"];
 
-test("a V2 Claude and Agency user moves to ourostack/desk and loses nothing", () => {
+test("a V2 Claude and Agency user with no V1 plugins moves completely and loses nothing", () => {
   const blocks = moveMigration();
   withSandbox({
-    installed: [...V2_CLAUDE, "crew@ouroboros-skills project"],
+    installed: ["desk@ouroboros-skills", "crew@ouroboros-skills project"],
     oldRef: "v2-alpha",
     agencyToml: OLD_TOML,
     agencyBak: USER_BAK,
@@ -350,8 +425,10 @@ test("a V2 Claude and Agency user moves to ourostack/desk and loses nothing", ()
     assert.deepEqual(mutatingCalls(sandbox), [
       "plugin marketplace add ourostack/desk",
       "plugin marketplace update ourostack",
-      "plugin install --scope user desk@ourostack",
       "plugin install --scope project crew@ourostack",
+      "plugin install --scope user superpowers@ourostack",
+      "plugin install --scope user plain-language@ourostack",
+      "plugin install --scope user desk@ourostack",
       "plugin uninstall --scope project --keep-data crew@ouroboros-skills",
       "plugin uninstall --scope user --keep-data desk@ouroboros-skills",
       "plugin uninstall --scope user --keep-data superpowers@ouroboros-skills",
@@ -363,7 +440,9 @@ test("a V2 Claude and Agency user moves to ourostack/desk and loses nothing", ()
       "desk@ourostack user",
       "plain-language@ourostack user",
       "superpowers@ourostack user",
-    ], "Desk and its companions, including Crew, must come back from ourostack");
+    ], "Desk and its companions, including the project-scope Crew, come back from ourostack");
+    assert.equal(pluginList(sandbox).find((plugin) => plugin.id === "crew@ourostack").projectPath, sandbox.project, "Crew is reinstalled in its own project");
+    assertNoLoadErrors(sandbox);
 
     const settings = json(sandbox.settings);
     assert.deepEqual(settings.extraKnownMarketplaces, {
@@ -379,26 +458,81 @@ test("a V2 Claude and Agency user moves to ourostack/desk and loses nothing", ()
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML, "the backup holds the original agency.toml");
     assert.equal(read(`${sandbox.toml}.bak`), USER_BAK, "the user's own agency.toml.bak is untouched");
 
-    assert.match(first.announce, /^Desk moved to ourostack\/desk\./u);
-    assert.match(first.announce, /Restart this session/u);
+    assert.equal(first.shown, [
+      `Agency: ${sandbox.toml} now tracks github:ourostack/desk:plugins/<name>@main for crew desk plain-language superpowers. The original file is kept as ${sandbox.toml}.pre-ourostack-desk.`,
+      "Its other ourostack/ouroboros-skills entries stay as they are.",
+      "Claude Code: crew@ourostack, superpowers@ourostack, plain-language@ourostack, desk@ourostack now run from the ourostack marketplace (ourostack/desk), with automatic updates on.",
+      "Your desk binding carried over to the new install.",
+      "The old ouroboros-skills marketplace is removed.",
+      blocks.Announce,
+    ].join("\n"), "the operator sees exactly what changed on this machine, then Announce");
+    assert.doesNotMatch(first.shown, /V1 plugins stay/u);
 
     // A second session: Detect stays quiet, so Migrate never runs again.
     fs.writeFileSync(sandbox.log, "");
     assert.equal(drive(sandbox, blocks).fired, false, "Detect must not fire after the move");
-    assert.deepEqual(mutatingCalls(sandbox), []);
     // Even run directly, a second Migrate changes nothing.
     const again = run(sandbox, blocks.Migrate);
     assert.equal(again.status, 0, again.stderr);
+    assert.equal(again.stdout, "", "a second Migrate has nothing to report");
     assert.deepEqual(mutatingCalls(sandbox), [], "a second Migrate is a no-op");
     assert.equal(read(sandbox.toml), NEW_TOML);
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
   });
 });
 
-test("a failed uninstall stops with a clear message, keeps the backup and converges once fixed", () => {
+test("Work Suite keeps loading: its Plain Language stays, and the report names the V1 removal commands", () => {
   const blocks = moveMigration();
   withSandbox({
-    installed: [...V2_CLAUDE],
+    installed: ["desk@ouroboros-skills", "work-suite@ouroboros-skills"],
+    oldRef: "v2-alpha",
+  }, (sandbox) => {
+    const result = drive(sandbox, blocks);
+    assert.equal(result.migrate.status, 0, result.migrate.stderr);
+    assert.ok(!mutatingCalls(sandbox).includes("plugin uninstall --scope user --keep-data plain-language@ouroboros-skills"), "Work Suite's dependency must not be uninstalled");
+    assert.ok(!mutatingCalls(sandbox).includes("plugin marketplace remove ouroboros-skills"));
+    assert.deepEqual(installedIds(sandbox), [
+      "desk@ourostack user",
+      "plain-language@ouroboros-skills user",
+      "plain-language@ourostack user",
+      "ponytail-upstream@ouroboros-skills user",
+      "superpowers@ourostack user",
+      "work-suite@ouroboros-skills user",
+    ]);
+    assertNoLoadErrors(sandbox);
+    assert.ok(json(sandbox.settings).extraKnownMarketplaces["ouroboros-skills"], "the old marketplace entry stays");
+    assert.equal(result.shown, [
+      "Claude Code: superpowers@ourostack, plain-language@ourostack, desk@ourostack now run from the ourostack marketplace (ourostack/desk), with automatic updates on.",
+      "These V1 plugins stay installed from the old ouroboros-skills marketplace: plain-language@ouroboros-skills, ponytail-upstream@ouroboros-skills, work-suite@ouroboros-skills.",
+      "plain-language@ouroboros-skills stays because work-suite@ouroboros-skills depends on it.",
+      "V2 in ourostack/desk replaces V1. When you no longer need them, remove them with:",
+      "  claude plugin uninstall work-suite@ouroboros-skills",
+      "  claude plugin uninstall ponytail-upstream@ouroboros-skills",
+      "  claude plugin uninstall plain-language@ouroboros-skills",
+      "  claude plugin marketplace remove ouroboros-skills",
+      blocks.Announce,
+    ].join("\n"));
+    assert.equal(drive(sandbox, blocks).fired, false, "Detect goes quiet although the old marketplace stays on v2-alpha");
+  });
+});
+
+test("an unreadable manifest keeps every moved plugin that is still installed from ouroboros-skills", () => {
+  const blocks = moveMigration();
+  withSandbox({ installed: ["desk@ouroboros-skills", "work-suite@ouroboros-skills"], oldRef: "v2-alpha" }, (sandbox) => {
+    fs.rmSync(path.join(sandbox.cfg, "plugins", "cache", "ouroboros-skills", "work-suite", "0.0.0", ".claude-plugin", "plugin.json"));
+    const result = drive(sandbox, blocks);
+    assert.equal(result.migrate.status, 0, result.migrate.stderr);
+    assert.deepEqual(mutatingCalls(sandbox).filter((line) => line.startsWith("plugin uninstall")), [], "nothing is uninstalled when dependencies are unknown");
+    assert.match(result.shown, /desk@ouroboros-skills stays because the dependencies of work-suite@ouroboros-skills could not be read\./u);
+    assert.match(result.shown, /  claude plugin uninstall desk@ouroboros-skills\n/u);
+    assert.equal(drive(sandbox, blocks).fired, false, "Detect goes quiet once desk@ourostack is installed");
+  });
+});
+
+test("a failed uninstall stops with a clear message, keeps the backup and does not loop", () => {
+  const blocks = moveMigration();
+  withSandbox({
+    installed: ["desk@ouroboros-skills"],
     oldRef: "v2-alpha",
     agencyToml: OLD_TOML,
     oldBinding: OLD_BINDING,
@@ -412,64 +546,48 @@ test("a failed uninstall stops with a clear message, keeps the backup and conver
     assert.equal(read(sandbox.toml), NEW_TOML);
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
 
-    // Before the next session a dotfiles sync brings an old coordinate back.
+    // Desk already runs from ourostack, so the Claude side does not fire again: the message was the outcome.
+    assert.equal(drive(sandbox, blocks).fired, false, "Detect must not loop on a failed uninstall");
+
+    // A dotfiles sync brings an old coordinate back: only the Agency side moves again, and the backup keeps the original.
     const synced = `${OLD_TOML}# synced from dotfiles\n`;
     fs.writeFileSync(sandbox.toml, synced);
-    // desk@ouroboros-skills is still there, so Detect fires again and Migrate reports the same failure.
+    fs.writeFileSync(sandbox.log, "");
     const second = drive(sandbox, blocks);
-    assert.ok(second.fired, "Detect keeps firing while the old Desk is installed");
-    assert.notEqual(second.migrate.status, 0);
+    assert.ok(second.fired);
+    assert.equal(second.migrate.status, 0, second.migrate.stderr);
+    assert.deepEqual(mutatingCalls(sandbox), []);
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML, "a rerun never overwrites the original backup");
     assert.equal(read(sandbox.toml), `${NEW_TOML}# synced from dotfiles\n`);
-
-    // Once the uninstall works, the next session finishes the move and Detect goes quiet.
-    sandbox.env.FAKE_CLAUDE_FAIL = "";
-    const third = drive(sandbox, blocks);
-    assert.equal(third.migrate.status, 0, third.migrate.stderr);
-    assert.deepEqual(installedIds(sandbox), ["desk@ourostack user", "plain-language@ourostack user", "superpowers@ourostack user"]);
-    assert.equal(drive(sandbox, blocks).fired, false);
-    assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
-  });
-});
-
-test("the ouroboros-skills marketplace stays while Work Suite is installed from it", () => {
-  const blocks = moveMigration();
-  withSandbox({
-    installed: [...V2_CLAUDE, "work-suite@ouroboros-skills", "ponytail-upstream@ouroboros-skills"],
-    oldRef: "v2-alpha",
-  }, (sandbox) => {
-    const result = drive(sandbox, blocks);
-    assert.equal(result.migrate.status, 0, result.migrate.stderr);
-    assert.ok(!mutatingCalls(sandbox).includes("plugin marketplace remove ouroboros-skills"));
-    assert.deepEqual(installedIds(sandbox), [
-      "desk@ourostack user",
-      "plain-language@ourostack user",
-      "ponytail-upstream@ouroboros-skills user",
-      "superpowers@ourostack user",
-      "work-suite@ouroboros-skills user",
-    ]);
-    assert.ok(json(sandbox.settings).extraKnownMarketplaces["ouroboros-skills"], "the old marketplace entry stays");
-    assert.equal(drive(sandbox, blocks).fired, false);
+    assert.doesNotMatch(second.shown, /Claude Code/u);
   });
 });
 
 test("Superpowers and Plain Language are installed explicitly when Desk does not pull them in", () => {
   const blocks = moveMigration();
-  withSandbox({ installed: V2_CLAUDE, oldRef: "v2-alpha", noDeps: true }, (sandbox) => {
+  withSandbox({ installed: ["desk@ouroboros-skills"], oldRef: "v2-alpha", noDeps: true }, (sandbox) => {
+    // Seeding without dependencies: add them as the old Desk install would have.
+    for (const id of ["superpowers@ouroboros-skills", "plain-language@ouroboros-skills"]) {
+      const seed = spawnSync(sandbox.fakeClaude, ["plugin", "install", id], { cwd: sandbox.root, env: sandbox.env, encoding: "utf8" });
+      assert.equal(seed.status, 0, seed.stderr);
+    }
     const result = drive(sandbox, blocks);
     assert.equal(result.migrate.status, 0, result.migrate.stderr);
     assert.deepEqual(installedIds(sandbox), ["desk@ourostack user", "plain-language@ourostack user", "superpowers@ourostack user"]);
+    assertNoLoadErrors(sandbox);
   });
 });
 
-test("an existing desk-ourostack binding is never overwritten", () => {
+test("an existing desk-ourostack binding is never overwritten, and a Claude-only move reports only Claude", () => {
   const blocks = moveMigration();
   const newer = '{"schema_version":1,"desk":{"root":"/tmp/new-desk"}}\n';
-  withSandbox({ installed: V2_CLAUDE, oldRef: "v2-alpha", oldBinding: OLD_BINDING, newBinding: newer }, (sandbox) => {
+  withSandbox({ installed: ["desk@ouroboros-skills"], oldRef: "v2-alpha", oldBinding: OLD_BINDING, newBinding: newer }, (sandbox) => {
     const result = drive(sandbox, blocks);
     assert.equal(result.migrate.status, 0, result.migrate.stderr);
     assert.equal(read(sandbox.newBinding), newer);
     assert.equal(fs.existsSync(sandbox.toml), false, "Migrate must not create agency.toml");
+    assert.match(result.shown, /^Claude Code: /u);
+    assert.doesNotMatch(result.shown, /Agency|agency\.toml|binding carried over|V1/u);
   });
 });
 
@@ -477,10 +595,11 @@ test("V1 installs are never moved", () => {
   const blocks = moveMigration();
   const v1Toml = toml(V1_LINES);
   for (const oldRef of ["main", null]) {
-    withSandbox({ installed: V2_CLAUDE, oldRef, agencyToml: v1Toml }, (sandbox) => {
+    withSandbox({ installed: ["desk@ouroboros-skills"], oldRef, agencyToml: v1Toml }, (sandbox) => {
       assert.equal(run(sandbox, blocks.Detect).status, 1, `Detect must not fire for a marketplace on ${oldRef ?? "no ref"}`);
       const migrate = run(sandbox, blocks.Migrate);
       assert.equal(migrate.status, 0, migrate.stderr);
+      assert.equal(migrate.stdout, "");
       assert.deepEqual(mutatingCalls(sandbox), [], "Migrate must leave a V1 Claude install alone");
       assert.equal(read(sandbox.toml), v1Toml, "@main, no-ref and other coordinates stay untouched");
       assert.equal(fs.existsSync(`${sandbox.toml}.pre-ourostack-desk`), false);
@@ -488,7 +607,7 @@ test("V1 installs are never moved", () => {
   }
 });
 
-test("an Agency user without Claude Code moves, and a symlinked agency.toml stays a symlink", () => {
+test("an Agency user without Claude Code moves, a symlinked agency.toml stays a symlink, and the report names only Agency", () => {
   const blocks = moveMigration();
   withSandbox({ claude: false, agencyToml: OLD_TOML, agencyBak: USER_BAK, symlinkToml: true }, (sandbox) => {
     const result = drive(sandbox, blocks);
@@ -499,18 +618,22 @@ test("an Agency user without Claude Code moves, and a symlinked agency.toml stay
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
     assert.equal(read(`${sandbox.toml}.bak`), USER_BAK);
     assert.deepEqual(calls(sandbox), [], "no claude exists to call");
+    assert.match(result.shown, /^Agency: /u);
+    assert.doesNotMatch(result.shown, /Claude Code|binding|V1 plugins/u);
     assert.equal(drive(sandbox, blocks).fired, false);
   });
 });
 
-test("an Agency user with Claude Code but no V2 Claude install changes only agency.toml", () => {
+test("an Agency move is not blocked on a machine with Claude Code but no jq and no V2 Claude install", () => {
   const blocks = moveMigration();
-  withSandbox({ agencyToml: OLD_TOML }, (sandbox) => {
+  withSandbox({ agencyToml: OLD_TOML, withoutJq: true }, (sandbox) => {
+    assert.equal(spawnSync(BASH, ["-c", "command -v jq"], { env: sandbox.env }).status, 1, "jq must be absent");
     const result = drive(sandbox, blocks);
+    assert.ok(result.fired);
     assert.equal(result.migrate.status, 0, result.migrate.stderr);
-    assert.deepEqual(mutatingCalls(sandbox), []);
     assert.equal(read(sandbox.toml), NEW_TOML);
-    assert.equal(drive(sandbox, blocks).fired, false);
+    assert.deepEqual(mutatingCalls(sandbox), []);
+    assert.doesNotMatch(result.shown, /Claude Code/u);
   });
 });
 
