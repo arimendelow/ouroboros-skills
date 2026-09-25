@@ -1,5 +1,14 @@
 # desk plugin — changelog
 
+## 3.2.0-alpha.10.1 — 2026-09-24
+
+The final Desk release on the `ouroboros-skills` `v2-alpha` channel: Desk now lives in [ourostack/desk](https://github.com/ourostack/desk), and this release moves existing installs there. The Desk MCP stays at `desk-mcp@1.4.0-alpha.6`; its source and runtime packs are unchanged.
+
+- **Move migration.** `migrations/01-move-to-ourostack-desk.md` runs through `desk:session-start-migrations`. For Claude Code it adds the `ourostack/desk` marketplace, installs `desk@ourostack`, copies the saved desk binding from `plugins/data/desk-ouroboros-skills/` to `plugins/data/desk-ourostack/` without overwriting an existing one, uninstalls `desk`, `superpowers`, `plain-language` and `crew` from `@ouroboros-skills` and removes that marketplace. For Agency it rewrites `agency.toml` coordinates to `github:ourostack/desk:plugins/<name>@main` and keeps a `.pre-ourostack-desk` backup. Detect stops firing once neither the old Claude plugin nor the old Agency coordinate remains.
+- **Startup pointer.** Both startup hooks open with "Desk has moved to ourostack/desk. Run the move-to-ourostack-desk migration now (desk:session-start-migrations)."
+- **Pointers.** The repository `README.md` and `AGENTIC-ENGINEERING-V2.md` on `v2-alpha` point to ourostack/desk.
+- **Migration harness.** `scripts/test-desk-migrations.cjs` runs every Desk migration against a fake `claude` on `PATH` and temporary `CLAUDE_CONFIG_DIR`, `HOME` and `AGENCY_TOML`, and CI runs it in Validate skills.
+
 ## 3.2.0-alpha.10 — 2026-09-24
 
 Brings the claims-based browser context broker and bounded validation artifacts from main. The Desk MCP stays at `desk-mcp@1.4.0-alpha.6`; its source and runtime packs are unchanged.
