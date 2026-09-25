@@ -62,7 +62,7 @@ Pick the command for your engine:
 # top-level skills/ directory using the skill-management flow instead.
 ```
 
-Copilot-compatible hosts normally receive Work Suite through Desk's generated flattened bundle metadata. A direct Copilot load of this preview must explicitly include Work Suite 4.0.0-alpha.1, Plain Language v0.2.1, and Ponytail v4.9.0 because the root Copilot manifest does not resolve plugin dependencies.
+Copilot-compatible hosts normally receive Work Suite through Desk's generated flattened bundle metadata. A direct Copilot load of this preview must explicitly include Work Suite 4.0.0-alpha.2, Plain Language v0.2.1, and Ponytail v4.9.0 because the root Copilot manifest does not resolve plugin dependencies.
 
 ## Relationship to `skills/`
 

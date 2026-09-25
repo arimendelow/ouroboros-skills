@@ -1,5 +1,9 @@
 # Work Suite changelog
 
+## 4.0.0-alpha.2 — 2026-09-24
+
+Brings bounded validation artifacts from main (#215). `work-doer` treats coverage and fully instrumented builds as an exact-SHA final gate, copies proved outputs to a commit-addressed path before deleting the original, and removes test-owned build roots, containers and images once their proof is captured. The existing confidence packet and agreed-terminal-state wording are unchanged.
+
 ## 3.0.0 — 2026-08-26
 
 **Restore the operational workflow contract without restoring universal ceremony.** Clear work still routes directly. Coordinated and high-risk work regain source-grounded planning, strict TDD, complete changed-production coverage, verified merge outcomes, host-portable same-turn waiting, audited Autopilot state, and explicit cross-repo dependency handling. Direct Copilot loads now document their Plain Language v0.2.0 and Ponytail v4.9.0 companions instead of relying on inert root dependency metadata.
