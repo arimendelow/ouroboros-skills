@@ -74,6 +74,7 @@ deps_of() {
   case "$1" in
     desk) echo "superpowers plain-language" ;;
     work-suite) echo "plain-language ponytail-upstream" ;;
+    legacy-overlay) echo "desk plain-language" ;;
   esac
 }
 manifest_deps() { jq -r '.dependencies[]? | if type == "string" then . else .name end' "$(install_path "$1")/.claude-plugin/plugin.json" 2>/dev/null; }
@@ -213,6 +214,7 @@ function makeSandbox({
   withoutJq = false,
   fail = "",
   noDeps = false,
+  alsoNew = false,
 } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "desk-migration-")));
   const bin = path.join(root, "bin");
@@ -292,6 +294,11 @@ function makeSandbox({
     for (const entry of installed) {
       const [id, scope = "user"] = entry.split(" ");
       seed(["plugin", "install", "--scope", scope, id], scope === "user" ? root : project);
+    }
+    if (alsoNew) {
+      // The new Desk installed out of band, for example by following ourostack/desk SETUP.md before migrating.
+      seed(["plugin", "marketplace", "add", "ourostack/desk"]);
+      seed(["plugin", "install", "desk@ourostack"]);
     }
     fs.writeFileSync(sandbox.log, "");
   } else if (claude) {
@@ -516,20 +523,71 @@ test("Work Suite keeps loading: its Plain Language stays, and the report names t
   });
 });
 
-test("an unreadable manifest keeps every moved plugin that is still installed from ouroboros-skills", () => {
+test("an unreadable manifest keeps the companions but always removes the old Desk", () => {
   const blocks = moveMigration();
   withSandbox({ installed: ["desk@ouroboros-skills", "work-suite@ouroboros-skills"], oldRef: "v2-alpha" }, (sandbox) => {
     fs.rmSync(path.join(sandbox.cfg, "plugins", "cache", "ouroboros-skills", "work-suite", "0.0.0", ".claude-plugin", "plugin.json"));
     const result = drive(sandbox, blocks);
     assert.equal(result.migrate.status, 0, result.migrate.stderr);
-    assert.deepEqual(mutatingCalls(sandbox).filter((line) => line.startsWith("plugin uninstall")), [], "nothing is uninstalled when dependencies are unknown");
-    assert.match(result.shown, /desk@ouroboros-skills stays because the dependencies of work-suite@ouroboros-skills could not be read\./u);
-    assert.match(result.shown, /  claude plugin uninstall desk@ouroboros-skills\n/u);
-    assert.equal(drive(sandbox, blocks).fired, false, "Detect goes quiet once desk@ourostack is installed");
+    assert.deepEqual(mutatingCalls(sandbox).filter((line) => line.startsWith("plugin uninstall")), [
+      "plugin uninstall --scope user --keep-data desk@ouroboros-skills",
+    ], "only the old Desk is uninstalled when dependencies are unknown");
+    assert.ok(!installedIds(sandbox).includes("desk@ouroboros-skills user"), "the old Desk (and its nagging hook) is gone");
+    assert.match(result.shown, /superpowers@ouroboros-skills stays because the dependencies of work-suite@ouroboros-skills could not be read\./u);
+    assert.match(result.shown, /plain-language@ouroboros-skills stays because the dependencies of work-suite@ouroboros-skills could not be read\./u);
+    assert.doesNotMatch(result.shown, /desk@ouroboros-skills/u);
+    assert.equal(drive(sandbox, blocks).fired, false, "Detect goes quiet once the old Desk is gone");
   });
 });
 
-test("a failed uninstall stops with a clear message, keeps the backup and does not loop", () => {
+test("a V1 plugin that names the old Desk as a dependency keeps its companion but not the old Desk", () => {
+  const blocks = moveMigration();
+  withSandbox({ installed: ["desk@ouroboros-skills", "legacy-overlay@ouroboros-skills"], oldRef: "v2-alpha" }, (sandbox) => {
+    const result = drive(sandbox, blocks);
+    assert.equal(result.migrate.status, 0, result.migrate.stderr);
+    assert.ok(!installedIds(sandbox).includes("desk@ouroboros-skills user"), "the old Desk is always removed once the new Desk is installed");
+    assert.ok(installedIds(sandbox).includes("plain-language@ouroboros-skills user"), "the companion it names stays");
+    assert.match(result.shown, /plain-language@ouroboros-skills stays because legacy-overlay@ouroboros-skills depends on it\./u);
+    assert.equal(drive(sandbox, blocks).fired, false);
+  });
+});
+
+test("a machine with both the old and the new Desk installed migrates cleanly", () => {
+  const blocks = moveMigration();
+  withSandbox({ installed: ["desk@ouroboros-skills"], oldRef: "v2-alpha", alsoNew: true, oldBinding: OLD_BINDING }, (sandbox) => {
+    const result = drive(sandbox, blocks);
+    assert.ok(result.fired, "Detect keys on the old V2 install even when desk@ourostack exists");
+    assert.equal(result.migrate.status, 0, result.migrate.stderr);
+    assert.deepEqual(mutatingCalls(sandbox), [
+      "plugin marketplace add ourostack/desk",
+      "plugin marketplace update ourostack",
+      "plugin uninstall --scope user --keep-data desk@ouroboros-skills",
+      "plugin uninstall --scope user --keep-data superpowers@ouroboros-skills",
+      "plugin uninstall --scope user --keep-data plain-language@ouroboros-skills",
+      "plugin marketplace remove ouroboros-skills",
+    ], "nothing already installed from ourostack is reinstalled; the old copies are cleaned up");
+    assert.deepEqual(installedIds(sandbox), ["desk@ourostack user", "plain-language@ourostack user", "superpowers@ourostack user"]);
+    assertNoLoadErrors(sandbox);
+    assert.equal(json(sandbox.settings).extraKnownMarketplaces.ourostack.autoUpdate, true, "automatic updates are turned on");
+    assert.equal(read(sandbox.newBinding), OLD_BINDING, "the desk binding carries over");
+    assert.equal(drive(sandbox, blocks).fired, false, "the second Detect exits 1");
+  });
+});
+
+test("a project-scope V1 plugin's removal command runs from its project directory", () => {
+  const blocks = moveMigration();
+  withSandbox({ installed: ["desk@ouroboros-skills", "work-suite@ouroboros-skills project"], oldRef: "v2-alpha" }, (sandbox) => {
+    const result = drive(sandbox, blocks);
+    assert.equal(result.migrate.status, 0, result.migrate.stderr);
+    assert.ok(result.shown.includes(`\n  cd ${sandbox.project} && claude plugin uninstall --scope project work-suite@ouroboros-skills\n`), result.shown);
+    assertNoLoadErrors(sandbox);
+    // The printed command works as printed.
+    const removal = spawnSync(BASH, ["-c", `cd ${sandbox.project} && claude plugin uninstall --scope project work-suite@ouroboros-skills`], { cwd: sandbox.home, env: sandbox.env, encoding: "utf8" });
+    assert.equal(removal.status, 0, removal.stderr);
+  });
+});
+
+test("a failed uninstall stops with a clear message, keeps the backup and converges once fixed", () => {
   const blocks = moveMigration();
   withSandbox({
     installed: ["desk@ouroboros-skills"],
@@ -546,20 +604,25 @@ test("a failed uninstall stops with a clear message, keeps the backup and does n
     assert.equal(read(sandbox.toml), NEW_TOML);
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
 
-    // Desk already runs from ourostack, so the Claude side does not fire again: the message was the outcome.
-    assert.equal(drive(sandbox, blocks).fired, false, "Detect must not loop on a failed uninstall");
-
-    // A dotfiles sync brings an old coordinate back: only the Agency side moves again, and the backup keeps the original.
-    const synced = `${OLD_TOML}# synced from dotfiles\n`;
-    fs.writeFileSync(sandbox.toml, synced);
+    // Before the next session a dotfiles sync brings an old coordinate back.
+    fs.writeFileSync(sandbox.toml, `${OLD_TOML}# synced from dotfiles\n`);
+    // The old Desk is still installed, so Detect fires again: nothing is reinstalled and the same failure is reported.
     fs.writeFileSync(sandbox.log, "");
     const second = drive(sandbox, blocks);
-    assert.ok(second.fired);
-    assert.equal(second.migrate.status, 0, second.migrate.stderr);
-    assert.deepEqual(mutatingCalls(sandbox), []);
+    assert.ok(second.fired, "Detect keeps firing while the old Desk is installed");
+    assert.notEqual(second.migrate.status, 0);
+    assert.ok(!mutatingCalls(sandbox).some((line) => line.startsWith("plugin install")), "nothing already on ourostack is reinstalled");
     assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML, "a rerun never overwrites the original backup");
     assert.equal(read(sandbox.toml), `${NEW_TOML}# synced from dotfiles\n`);
-    assert.doesNotMatch(second.shown, /Claude Code/u);
+
+    // Once the uninstall works, the next session finishes the move and Detect goes quiet.
+    sandbox.env.FAKE_CLAUDE_FAIL = "";
+    const third = drive(sandbox, blocks);
+    assert.equal(third.migrate.status, 0, third.migrate.stderr);
+    assert.deepEqual(installedIds(sandbox), ["desk@ourostack user", "plain-language@ourostack user", "superpowers@ourostack user"]);
+    assert.ok(third.shown.includes("The old ouroboros-skills marketplace is removed."));
+    assert.equal(drive(sandbox, blocks).fired, false);
+    assert.equal(read(`${sandbox.toml}.pre-ourostack-desk`), OLD_TOML);
   });
 });
 
@@ -624,9 +687,9 @@ test("an Agency user without Claude Code moves, a symlinked agency.toml stays a 
   });
 });
 
-test("an Agency move is not blocked on a machine with Claude Code but no jq and no V2 Claude install", () => {
+test("an Agency move is not blocked on a machine with Claude Code but no jq and only a V1 Claude install", () => {
   const blocks = moveMigration();
-  withSandbox({ agencyToml: OLD_TOML, withoutJq: true }, (sandbox) => {
+  withSandbox({ installed: ["desk@ouroboros-skills"], oldRef: "main", agencyToml: OLD_TOML, withoutJq: true }, (sandbox) => {
     assert.equal(spawnSync(BASH, ["-c", "command -v jq"], { env: sandbox.env }).status, 1, "jq must be absent");
     const result = drive(sandbox, blocks);
     assert.ok(result.fired);

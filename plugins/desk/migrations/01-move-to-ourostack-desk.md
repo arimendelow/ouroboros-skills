@@ -14,14 +14,15 @@ CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 command -v claude >/dev/null && command -v jq >/dev/null || exit 1
 ref="$({ jq -r '."ouroboros-skills".source.ref // empty' "$CFG/plugins/known_marketplaces.json"; jq -r '.extraKnownMarketplaces."ouroboros-skills".source.ref // empty' "$CFG/settings.json"; } 2>/dev/null | head -n 1)"
 [ "$ref" = "v2-alpha" ] || exit 1
-claude plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "desk@ouroboros-skills") and (any(.[]; .id == "desk@ourostack") | not)' >/dev/null
+claude plugin list --json 2>/dev/null | jq -e 'any(.[]; .id == "desk@ouroboros-skills")' >/dev/null
 ```
 
 ## Safety check
 
 ```bash
 command -v git >/dev/null && command -v gh >/dev/null || { echo "git and gh are required"; exit 1; }
-if command -v claude >/dev/null && ! command -v jq >/dev/null && claude plugin list 2>/dev/null | grep -q "desk@ouroboros-skills"; then
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if command -v claude >/dev/null && ! command -v jq >/dev/null && grep -Eqs '"ref": *"v2-alpha"' "$CFG/plugins/known_marketplaces.json" && claude plugin list 2>/dev/null | grep -q "desk@ouroboros-skills"; then
   echo "jq is required to move the Claude Code plugins; install jq, then restart the session"
   exit 1
 fi
@@ -61,14 +62,21 @@ old_ref() {
 }
 ids() { claude plugin list --json 2>/dev/null | jq -r '.[] | "\(.id) \(.scope // "user")"'; }
 has() { ids | grep -q "^$1 "; }
-if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@ouroboros-skills && ! has desk@ourostack; then
+if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@ouroboros-skills; then
   # Every plugin installed from ouroboros-skills: name, scope, project path, install path.
   before="$(claude plugin list --json 2>/dev/null | jq -r '.[] | select(.id | endswith("@ouroboros-skills")) | [(.id | sub("@ouroboros-skills$"; "")), (.scope // "user"), (.projectPath // ""), (.installPath // "")] | join("\u001f")')"
   field() { printf '%s\n' "$before" | awk -F "$US" -v n="$1" -v f="$2" '$1 == n { print $f; exit }'; }
   old() { [ -n "$(field "$1" 1)" ]; }
   # Run a command from the plugin's project directory when it was installed at project or local scope.
   in_project() { local dir="$1"; shift; if [ -n "$dir" ]; then (cd "$dir" && "$@"); else "$@"; fi; }
-  scope_flag() { local s; s="$(field "$1" 2)"; [ "$s" = user ] && return 0; printf ' --scope %s' "$s"; }
+  # The removal command for a plugin, run from its project directory when it was installed at project or local scope.
+  remove_cmd() {
+    local s dir
+    s="$(field "$1" 2)"; dir="$(field "$1" 3)"
+    if [ "$s" = user ]; then printf 'claude plugin uninstall %s@ouroboros-skills' "$1"; return; fi
+    [ -z "$dir" ] || printf 'cd %q && ' "$dir"
+    printf 'claude plugin uninstall --scope %s %s@ouroboros-skills' "$s" "$1"
+  }
 
   claude plugin marketplace add ourostack/desk >&2
   claude plugin marketplace update ourostack >&2
@@ -85,9 +93,11 @@ if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@our
   binding=""
   if [ -f "$OLD" ] && [ ! -f "$NEW" ]; then mkdir -p "$(dirname "$NEW")" && cp "$OLD" "$NEW" && binding="copied"; fi
 
-  # Never remove an old plugin that a plugin staying in ouroboros-skills depends on. Dependencies come from each
-  # staying plugin's installed manifest; if a manifest cannot be read, every moved plugin is kept (fail safe).
+  # Never remove an old companion that a plugin staying in ouroboros-skills depends on. Dependencies come from each
+  # staying plugin's installed manifest; if a manifest cannot be read, every moved companion is kept (fail safe).
+  # The old Desk is never a V1 dependency, so it is always removed once the new Desk is installed.
   MOVED="desk crew superpowers plain-language"
+  COMPANIONS="crew superpowers plain-language"
   DEPS='.dependencies[]? | (if type == "string" then . else (.name // empty) end) | if test("@") then (select(endswith("@ouroboros-skills")) | sub("@ouroboros-skills$"; "")) else . end'
   keep=""
   why=""
@@ -101,12 +111,12 @@ if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@our
       if [ -n "$path" ] && deps="$(jq -r "$DEPS" "$path/.claude-plugin/plugin.json" 2>/dev/null)"; then
         reason="$name@ouroboros-skills depends on it"
       else
-        deps="$MOVED"
+        deps="$COMPANIONS"
         reason="the dependencies of $name@ouroboros-skills could not be read"
       fi
       for dep in $deps; do
         needed="$needed $dep"
-        case " $MOVED " in *" $dep "*) ;; *) continue ;; esac
+        case " $COMPANIONS " in *" $dep "*) ;; *) continue ;; esac
         case " $keep " in *" $dep "*) continue ;; esac
         old "$dep" || continue
         keep="$keep $dep"
@@ -116,7 +126,7 @@ if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@our
     done <<< "$before"
   done
 
-  # Reinstall every moved plugin from ourostack in its original scope; Desk goes last, so a failed install is retried next session.
+  # Reinstall every moved plugin from ourostack in its original scope, skipping any already installed there; Desk goes last.
   moved=""
   for p in crew superpowers plain-language desk; do
     old "$p" || continue
@@ -153,7 +163,7 @@ if command -v claude >/dev/null && [ "$(old_ref)" = "v2-alpha" ] && has desk@our
     done
     for k in $keep; do order="$order $k@ouroboros-skills"; done
     for id in $order; do
-      say "  claude plugin uninstall$(scope_flag "${id%@*}") $id"
+      say "  $(remove_cmd "${id%@*}")"
     done
     say "  claude plugin marketplace remove ouroboros-skills"
   fi
