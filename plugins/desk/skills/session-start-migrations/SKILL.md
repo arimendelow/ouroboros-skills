@@ -47,9 +47,9 @@ Field semantics:
 - `safety` — see the **Safety semantics** section below.
 - `needs_restart` — if `true`, after a successful migration the session hard-stops with a "please restart" message. If `false`, the session continues into the next migration / normal session-start flow.
 
-### Body: four required fenced bash code blocks
+### Body: three fenced bash code blocks and a plain-text Announce
 
-Each section is a level-2 markdown heading followed by exactly one fenced bash code block.
+Each section is a level-2 markdown heading. `Detect`, `Safety check` and `Migrate` each hold exactly one fenced bash code block; `Announce` holds plain text.
 
 ```
 ## Detect

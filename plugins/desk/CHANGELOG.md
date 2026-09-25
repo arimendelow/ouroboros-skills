@@ -2,12 +2,15 @@
 
 ## 3.2.0-alpha.10.1 — 2026-09-24
 
-The final Desk release on the `ouroboros-skills` `v2-alpha` channel: Desk now lives in [ourostack/desk](https://github.com/ourostack/desk), and this release moves existing installs there. The Desk MCP stays at `desk-mcp@1.4.0-alpha.6`; its source and runtime packs are unchanged.
+The final Desk release on the `ouroboros-skills` `v2-alpha` channel: Desk now lives in [ourostack/desk](https://github.com/ourostack/desk), and this release moves existing V2 installs there. The Desk MCP stays at `desk-mcp@1.4.0-alpha.6`; its source and runtime packs are unchanged.
 
-- **Move migration.** `migrations/01-move-to-ourostack-desk.md` runs through `desk:session-start-migrations`. For Claude Code it adds the `ourostack/desk` marketplace, installs `desk@ourostack`, copies the saved desk binding from `plugins/data/desk-ouroboros-skills/` to `plugins/data/desk-ourostack/` without overwriting an existing one, uninstalls `desk`, `superpowers`, `plain-language` and `crew` from `@ouroboros-skills` and removes that marketplace. For Agency it rewrites `agency.toml` coordinates to `github:ourostack/desk:plugins/<name>@main` and keeps a `.pre-ourostack-desk` backup. Detect stops firing once neither the old Claude plugin nor the old Agency coordinate remains.
-- **Startup pointer.** Both startup hooks open with "Desk has moved to ourostack/desk. Run the move-to-ourostack-desk migration now (desk:session-start-migrations)."
+- **Move migration.** `migrations/01-move-to-ourostack-desk.md` runs through `desk:session-start-migrations` and moves only V2 installs.
+  - Claude Code: it runs when `desk@ouroboros-skills` is installed and the `ouroboros-skills` marketplace tracks `v2-alpha`. It adds the `ourostack/desk` marketplace with automatic updates on, copies the saved desk binding from `plugins/data/desk-ouroboros-skills/` to `plugins/data/desk-ourostack/` without overwriting an existing one, and reinstalls Desk (with Superpowers and Plain Language) and Crew, if it was installed, from `@ourostack` in their original scopes. It then uninstalls the old copies while keeping their data, and removes the `ouroboros-skills` marketplace only when no other plugin from it, such as Work Suite, is still installed. A failed uninstall stops the migration with the command to run, and the next session retries.
+  - Agency: it rewrites only `github:ourostack/ouroboros-skills:plugins/<desk|superpowers|plain-language|crew>@v2-alpha` to `github:ourostack/desk:plugins/<name>@main`. `@main` and no-ref (V1) coordinates stay. It writes a `.pre-ourostack-desk` backup once, never touches an existing `agency.toml.bak`, and keeps a symlinked `agency.toml` a symlink.
+- **Startup pointer.** Both startup hooks open with "Desk has moved to ourostack/desk. Run the move-to-ourostack-desk migration now (desk:session-start-migrations):" followed by the installed path of the migration file.
+- **Migration format.** `session-start-migrations` now states the format consistently: Detect, Safety check and Migrate each hold one fenced bash block, and Announce is plain text.
 - **Pointers.** The repository `README.md` and `AGENTIC-ENGINEERING-V2.md` on `v2-alpha` point to ourostack/desk.
-- **Migration harness.** `scripts/test-desk-migrations.cjs` runs every Desk migration against a fake `claude` on `PATH` and temporary `CLAUDE_CONFIG_DIR`, `HOME` and `AGENCY_TOML`, and CI runs it in Validate skills.
+- **Migration harness.** `scripts/test-desk-migrations.cjs` runs every Desk migration against a fake `claude` on `PATH` that can fail chosen commands, with temporary `HOME`, `CLAUDE_CONFIG_DIR` and `AGENCY_TOML`, across first runs, reruns, failures and V1 installs. CI runs it in Validate skills.
 
 ## 3.2.0-alpha.10 — 2026-09-24
 
